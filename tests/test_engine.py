@@ -3,7 +3,7 @@ from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 from trener import messages as M
-from trener.engine import (apply_reports, compute_streak, current_session, default_session,
+from trener.engine import (apply_reports, compute_streak, current_session, default_session, elapsed,
                            fill_missing_days, nag_due, next_goal, plan, streak_after)
 from trener.model import EVENING, MORNING, Day, NagState, Report, Settings, Snapshot, split_goal
 
@@ -180,3 +180,25 @@ def test_report_reply_text():
     assert "+2 ráno" in txt and "ráno 4/5" in txt and "dnes 4/10" in txt and "zostáva 6" in txt
     done = M.report_reply(Day(D, 10, 5, 5), {MORNING: 0, EVENING: 5}, True, 3, 12)
     assert "🎉" in done and "Streak 3" in done and "12" in done
+
+
+def test_total_report_sets_day_total():
+    r = apply_reports(Day(D, 10, morning=3), [Report(EVENING, 10, absolute=True, total=True)])
+    assert (r.day.morning, r.day.evening, r.completed_now) == (3, 7, True)
+    r = apply_reports(Day(D, 10, morning=4), [Report(MORNING, -2)])
+    assert r.day.morning == 2 and r.added[MORNING] == -2
+
+
+def test_elapsed_is_dst_safe():
+    # 25. 10. 2026 sa o 03:00 CEST vracia na 02:00 CET – 02:30 existuje dvakrát
+    first = datetime(2026, 10, 25, 2, 30, tzinfo=TZ, fold=0)
+    second = datetime(2026, 10, 25, 2, 30, tzinfo=TZ, fold=1)
+    assert elapsed(second, first) == timedelta(hours=1)
+    assert second - first == timedelta(0)            # naivné odčítanie by výzvy zaseklo
+
+
+def test_fill_missing_days_ignores_future_rows():
+    days = [Day(date(2026, 9, 1), 12, 6, 6), Day(date(2026, 9, 20), 30)]   # používateľ si naplánoval budúcnosť
+    new = fill_missing_days(days, D, Settings(increment=2), 10)
+    assert [(d.date, d.goal) for d in new] == [(D, 14)]
+    assert fill_missing_days([Day(date(2026, 9, 20), 30)], D, Settings(), 10)[0].date == D

@@ -142,10 +142,16 @@ class Day:
 
 @dataclass
 class Report:
-    """Jedno hlásenie z chatu: +n do fázy (alebo nastav = n)."""
+    """Jedno hlásenie z chatu: +n do fázy (alebo nastav = n).
+
+    total=True: „spolu 10“ bez určenia fázy → dnešný súčet má byť n (dopočíta sa do
+    aktuálnej fázy). day_offset=-1: hlásenie sa týka včerajška („včera 5“).
+    """
     session: str
     n: int
     absolute: bool = False
+    total: bool = False
+    day_offset: int = 0
 
 
 @dataclass

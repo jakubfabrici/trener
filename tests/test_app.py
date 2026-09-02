@@ -160,9 +160,31 @@ def test_freeze_from_table_cell(h):
     h.tick_at(at(6, 0))
     h.edit_setting("Zamrazené", "ÁNO")
     h.tick_at(at(6, 3))
-    assert h.t.settings().frozen is True
+    assert h.t.settings().frozen is True and h.store.get_day(D).frozen is True
     h.tick_at(at(7, 0))
     assert h.take() == []
+    # odmrazenie cez tabuľku odmrazí aj dnešok → výzvy a pripomienky idú
+    h.edit_setting("Zamrazené", "NIE")
+    h.tick_at(at(7, 5))
+    assert h.t.settings().frozen is False and h.store.get_day(D).frozen is False
+    assert h.table_rows()[D][3].startswith("⏳")
+    h.tick_at(at(7, 6))
+    assert [m.startswith("☀️") for m in h.take()] == [True]
+
+
+def test_yesterday_report_and_wake_floor(h):
+    h.tick_at(at(6, 0))
+    nd = D + timedelta(days=1)
+    h.tick_at(at(0, 0, 30, nd))
+    h.take()
+    reply = h.text(at(8, 0, 0, nd), "včera večer 12")
+    assert "včera 12/12" in reply and "dodatočne" in reply
+    assert h.store.get_day(D).done and h.store.get_day(nd).total == 0
+    # wake pred 04:00 sa ignoruje, po 04:00 spustí ranné výzvy hneď
+    h.clock[0] = at(3, 30, 0, nd); h.t.wake(); assert h.t.woke_date is None
+    h.clock[0] = at(5, 0, 0, nd); h.t.wake(); assert h.t.woke_date == nd
+    h.tick_at(at(5, 0, 5, nd))
+    assert [m.startswith("☀️") for m in h.take()] == [True]
 
 
 def test_user_edits_table_counts_and_completes(h):

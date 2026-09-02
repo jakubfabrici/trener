@@ -24,7 +24,9 @@ def keyboard(frozen: bool) -> InlineKeyboardMarkup:
 
 
 def register(app: Application, trainer, owner_chat_id: int) -> None:
-    own = filters.Chat(chat_id=owner_chat_id)
+    # len nové správy od majiteľa – editované správy (UpdateType.EDITED_MESSAGE) ignorujeme,
+    # inak by opravené číslo prišlo druhýkrát a update.message by bolo None
+    own = filters.Chat(chat_id=owner_chat_id) & filters.UpdateType.MESSAGE
 
     async def start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(M.HELLO)
@@ -73,7 +75,7 @@ def register(app: Application, trainer, owner_chat_id: int) -> None:
 
     async def oprav(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         args = [normalize(a) for a in ctx.args]
-        if len(args) != 2 or not args[1].isdigit():
+        if len(args) != 2 or not args[1].isdigit() or int(args[1]) > 100000:
             await update.message.reply_text(M.BAD_FIX)
             return
         if args[0] in ("rano", "r"):

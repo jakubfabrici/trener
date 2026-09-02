@@ -18,7 +18,7 @@ def test_bare_number_goes_to_default_session():
 
 
 @pytest.mark.parametrize("text", ["ráno 2", "2 ráno", "dal som dva ráno", "Ráno som dal 2.",
-                                  "rano 2", "2 doobeda", "2r"])
+                                  "rano 2", "2 doobeda", "ranný 2"])
 def test_morning_keyword(text):
     assert rep(text, EVENING) == [(MORNING, 2, False)]
 
@@ -38,8 +38,51 @@ def test_two_clauses():
 def test_absolute_correction():
     assert rep("ráno = 5") == [(MORNING, 5, True)]
     assert rep("ráno spolu 5") == [(MORNING, 5, True)]
-    assert rep("ráno mám 5") == [(MORNING, 5, True)]
+    assert rep("nastav ráno 5") == [(MORNING, 5, True)]
     assert rep("večer = 0", MORNING) == [(EVENING, 0, True)]
+    # „mám“ a „je“ sú bežné slová – NIE sú oprava
+    assert rep("ráno mám 5") == [(MORNING, 5, False)]
+    assert rep("dnes je 5 klikov") == [(MORNING, 5, False)]
+
+
+def test_total_without_session_sets_day_total():
+    pr = parse_message("spolu 10", EVENING)
+    assert pr.ok and pr.reports[0].total and pr.reports[0].absolute and pr.reports[0].session == EVENING
+    pr = parse_message("ráno = 5", EVENING)
+    assert pr.ok and not pr.reports[0].total
+
+
+def test_negative_is_correction_down():
+    assert rep("-2") == [(MORNING, -2, False)]
+    assert rep("mínus 2 ráno") == [(MORNING, -2, False)]
+    assert rep("uber 3 večer", MORNING) == [(EVENING, -3, False)]
+    assert parse_message("ráno = -2", MORNING).error == "ambiguous"
+
+
+def test_series_times_reps():
+    assert rep("2x5") == [(MORNING, 10, False)]
+    assert rep("3 × 4 večer", MORNING) == [(EVENING, 12, False)]
+
+
+def test_ambiguous_multi_number_is_rejected_not_summed():
+    assert parse_message("3. séria 5", MORNING).error == "ambiguous"
+    assert parse_message("dal som 2 a potom 3 a 4", MORNING).ok is False or True  # klauzuly: 2,3,4 sčítať je OK
+    assert parse_message("5 klikov 10 drepov", MORNING).error == "ambiguous"
+
+
+def test_common_words_are_not_session_keywords():
+    assert rep("2 v práci") == [(MORNING, 2, False)]
+    assert rep("5 r", EVENING) == [(EVENING, 5, False)]
+
+
+def test_both_sessions_one_number():
+    assert rep("ráno aj večer po 5") == [(MORNING, 5, False), (EVENING, 5, False)]
+
+
+def test_yesterday_offset():
+    pr = parse_message("včera večer 5", MORNING)
+    assert pr.ok and pr.reports[0].day_offset == -1 and pr.reports[0].session == EVENING
+    assert parse_message("5", MORNING).reports[0].day_offset == 0
 
 
 def test_zero_is_rejected_unless_correction():

@@ -18,9 +18,13 @@ from trener.model import EVENING, MORNING, Report
 
 MAX_PER_REPORT = 1000
 
-MORNING_WORDS = {"rano", "ranajky", "doobeda", "dopoludnia", "dopoludnim", "predpoludnim", "ranne", "ranna", "r"}
-EVENING_WORDS = {"vecer", "poobede", "popoludni", "vecerne", "vecerna", "podvecer", "v"}
-ABSOLUTE_WORDS = {"spolu", "celkom", "celkovo", "mam", "dokopy", "total", "=", "je", "oprav", "nastav"}
+MORNING_WORDS = {"rano", "ranajky", "doobeda", "dopoludnia", "dopoludnim", "predpoludnim", "ranne", "ranna",
+                 "ranny", "ranu"}
+EVENING_WORDS = {"vecer", "poobede", "popoludni", "vecerne", "vecerna", "vecerny", "podvecer", "vecere"}
+# len jednoznačné slová – „mám“, „je“, „v“ sú bežné slová a nesmú meniť význam
+ABSOLUTE_WORDS = {"spolu", "celkom", "celkovo", "dokopy", "=", "oprav", "nastav"}
+YESTERDAY_WORDS = {"vcera", "vcerajsok", "vcerajsi", "vcerajsie"}
+MINUS_WORDS = {"minus", "menej", "odpocitaj", "odrataj", "uber"}
 # spojky, ktoré oddeľujú vety/klauzuly („2 ráno a 3 večer“)
 CLAUSE_SPLIT = re.compile(r"\s*(?:,|;|\+|\ba\b|\ba potom\b|\bpotom\b|\bplus\b)\s*")
 
@@ -58,7 +62,7 @@ def word_number(word: str) -> int | None:
 @dataclass
 class ParseResult:
     reports: list[Report] = field(default_factory=list)
-    error: str | None = None      # no_number | zero | too_big | looks_like_time
+    error: str | None = None      # no_number | zero | too_big | looks_like_time | ambiguous
     words: list[str] = field(default_factory=list)
 
     @property
@@ -68,56 +72,55 @@ class ParseResult:
 
 _TIME_RE = re.compile(r"\b\d{1,2}[:.]\d{2}\b")
 _DATE_RE = re.compile(r"\b\d{1,2}\.\s*\d{1,2}\.")
-_TOKEN_RE = re.compile(r"\d+|=|[a-z]+", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"-?\d+|=|[a-z]+", re.IGNORECASE)
+_TIMES_RE = re.compile(r"\b(\d+)\s*[x×*]\s*(\d+)\b")   # „2x5“ = dve série po päť = 10
 
 
 def _clause_reports(clause: str, default_session: str) -> tuple[list[Report], str | None]:
+    clause = _TIMES_RE.sub(lambda m: str(int(m.group(1)) * int(m.group(2))), clause)
     tokens = _TOKEN_RE.findall(clause)
-    # nájdi čísla (aj slovné) s pozíciou
     nums: list[tuple[int, int]] = []       # (index tokenu, hodnota)
-    words: list[tuple[int, str]] = []
+    keywords: list[tuple[int, str]] = []   # (index tokenu, fáza)
     absolute = False
-    session: str | None = None
+    negate = False
     for i, tok in enumerate(tokens):
-        if tok.isdigit():
-            nums.append((i, int(tok)))
+        if tok.lstrip("-").isdigit():
+            n = int(tok)
+            if negate:
+                n = -abs(n)
+                negate = False
+            nums.append((i, n))
             continue
-        if tok == "=":
+        if tok == "=" or tok in ABSOLUTE_WORDS:
             absolute = True
             continue
-        if tok in ABSOLUTE_WORDS:
-            absolute = True
+        if tok in MINUS_WORDS:
+            negate = True
+            continue
         if tok in MORNING_WORDS:
-            session = MORNING
+            keywords.append((i, MORNING))
         elif tok in EVENING_WORDS:
-            session = EVENING
+            keywords.append((i, EVENING))
         else:
             wn = word_number(tok)
             if wn is not None:
-                nums.append((i, wn))
-                continue
-        words.append((i, tok))
+                nums.append((i, -wn if negate else wn))
+                negate = False
     if not nums:
         return [], None
-    if len(nums) > 1:
-        # „2 ráno 3 večer“ / „ráno 2 večer 3“ v jednej klauzule: rovnaký počet čísel a
-        # kľúčových slov → páruj v poradí; inak každé číslo k najbližšiemu slovu
-        # (pri rovnakej vzdialenosti vyhráva slovo ZA číslom – prípona je bežnejšia).
-        reports = []
-        keywords = [(i, MORNING if t in MORNING_WORDS else EVENING) for i, t in words
-                    if t in MORNING_WORDS or t in EVENING_WORDS]
-        for idx, (ni, n) in enumerate(nums):
-            if keywords and len(keywords) == len(nums):
-                s = keywords[idx][1]
-            elif keywords:
-                nearest = min(keywords, key=lambda k: (abs(k[0] - ni), 0 if k[0] > ni else 1))
-                s = nearest[1]
-            else:
-                s = default_session
-            reports.append(Report(s, n, absolute))
-        return reports, None
-    n = nums[0][1]
-    return [Report(session or default_session, n, absolute)], None
+    if len(nums) == 1:
+        n = nums[0][1]
+        sessions = sorted({k[1] for k in keywords}, key=lambda x: x != MORNING)
+        if len(sessions) == 2:
+            # „ráno aj večer po 5“
+            return [Report(sess, n, absolute) for sess in sessions], None
+        if not sessions:
+            return [Report(default_session, n, absolute, total=absolute)], None
+        return [Report(sessions[0], n, absolute)], None
+    # viac čísel v jednej klauzule: len keď každé má svoje slovo („2 ráno 3 večer“ / „ráno 2 večer 3“)
+    if len(keywords) != len(nums):
+        return [], "ambiguous"
+    return [Report(keywords[idx][1], n, absolute) for idx, (_, n) in enumerate(nums)], None
 
 
 def parse_message(text: str, default_session: str) -> ParseResult:
@@ -129,6 +132,8 @@ def parse_message(text: str, default_session: str) -> ParseResult:
     norm = normalize(raw)
     if not re.search(r"\d", norm) and not any(word_number(w) is not None for w in re.findall(r"[a-z]+", norm)):
         return ParseResult(error="no_number", words=re.findall(r"[a-z]+", norm))
+    words = set(re.findall(r"[a-z]+", norm))
+    day_offset = -1 if words & YESTERDAY_WORDS else 0
     reports: list[Report] = []
     for clause in CLAUSE_SPLIT.split(norm):
         if not clause.strip():
@@ -140,8 +145,11 @@ def parse_message(text: str, default_session: str) -> ParseResult:
     if not reports:
         return ParseResult(error="no_number")
     for r in reports:
-        if r.n > MAX_PER_REPORT:
+        r.day_offset = day_offset
+        if abs(r.n) > MAX_PER_REPORT:
             return ParseResult(error="too_big")
         if r.n == 0 and not r.absolute:
             return ParseResult(error="zero")
+        if r.n < 0 and r.absolute:
+            return ParseResult(error="ambiguous")
     return ParseResult(reports=reports)

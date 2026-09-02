@@ -21,8 +21,8 @@ from telegram.ext import Application, ApplicationBuilder
 from trener import config as C
 from trener import messages as M
 from trener.caldav_todo import TodoList
-from trener.engine import (Snapshot, apply_reports, compute_streak, default_session, fill_missing_days,
-                           next_goal, plan, streak_after)
+from trener.engine import (WAKE_FLOOR, Snapshot, apply_reports, compute_streak, default_session, elapsed,
+                           fill_missing_days, next_goal, plan, streak_after)
 from trener.model import EVENING, MORNING, Day, Report, Settings
 from trener.parsing import parse_message
 from trener.reminders import ReminderSync
@@ -81,7 +81,11 @@ class Trainer:
         self._kick.set()
 
     def wake(self) -> None:
-        self.woke_date = self.now().date()
+        now = self.now()
+        if now.time() < WAKE_FLOOR:
+            log.info("Wake signál o %s ignorovaný (pred %s).", now.strftime("%H:%M"), WAKE_FLOOR)
+            return
+        self.woke_date = now.date()
         log.info("Wake signál z telefónu.")
         self.kick()
 
@@ -140,7 +144,7 @@ class Trainer:
             await self._nags(now)
 
     def _due(self, last: datetime | None, seconds: int) -> bool:
-        return last is None or (self.now() - last) >= timedelta(seconds=seconds)
+        return last is None or elapsed(self.now(), last) >= timedelta(seconds=seconds)
 
     # ── prechod dňa ─────────────────────────────────────────────────────────
     async def _rollover_if_needed(self, now: datetime) -> None:
@@ -186,7 +190,8 @@ class Trainer:
             except TableCorrupt as e:
                 await self._table_failure(f"súbor sa nedá prečítať ({e}) – NEPREPISUJEM ho")
                 return
-        m = merge(parsed, self.store.days_with_synced(), self.settings(),
+        settings_before = self.settings()
+        m = merge(parsed, self.store.days_with_synced(), settings_before,
                   self.store.get_settings_synced(), today)
         # prevezmi zmeny z tabuľky do lokálneho stavu
         before_today = self.store.get_day(today)
@@ -197,6 +202,12 @@ class Trainer:
         if m.changed_settings:
             self.store.save_settings(m.settings)
             self.rem_dirty = True
+            if "frozen" in m.changed_settings and m.settings.frozen != settings_before.frozen:
+                self._apply_frozen_to_today(m.settings.frozen)
+                log.info("Zamrazenie zmenené v tabuľke: %s", m.settings.frozen)
+                # dnešný riadok sa zmenil → do tabuľky
+                m = merge(parsed, self.store.days_with_synced(), m.settings,
+                          self.store.get_settings_synced(), today)
         for note in m.from_table:
             log.info("Tabuľka → bot: %s", note)
         if m.to_table:
@@ -297,7 +308,9 @@ class Trainer:
 
     async def _nags(self, now: datetime) -> None:
         s = self.settings()
-        day = self.today_day()
+        day = self.store.get_day(now.date())
+        if day is None or self.now().date() != now.date():
+            return  # tick prešiel cez polnoc – výzvy až v ďalšom ticku s novým dňom
         nags = {k: self.store.get_nag(day.date, k) for k in (MORNING, EVENING)}
         snap = Snapshot(now, s, day, nags, woke_up=self.woke_date == now.date())
         for a in plan(snap):
@@ -320,8 +333,8 @@ class Trainer:
             log.warning("HA budík zlyhal: %s", e)
 
     # ── zmeny stavu (z chatu / pripomienok) ─────────────────────────────────
-    def _apply(self, reports: list[Report]):
-        day = self.today_day()
+    def _apply(self, reports: list[Report], day: Day | None = None):
+        day = day if day is not None else self.today_day()
         res = apply_reports(day, reports)
         self.store.save_day(res.day)
         self.table_dirty = True
@@ -337,8 +350,20 @@ class Trainer:
             pr = parse_message(text, default_session(now, s))
             if not pr.ok:
                 return M.ERRORS.get(pr.error or "no_number", M.NOT_A_NUMBER)
-            res = self._apply(pr.reports)
             today = now.date()
+            offset = pr.reports[0].day_offset
+            if offset:
+                target_date = today + timedelta(days=offset)
+                target = self.store.get_day(target_date)
+                if target is None:
+                    return f"Na {target_date.day}.{target_date.month}. nemám žiadny riadok – doplň ho do tabuľky."
+                res = self._apply(pr.reports, target)
+                streak = compute_streak(self.store.all_days(), today)
+                log.info("Hlásenie za %s %s → %s/%s", target_date,
+                         [(r.session, r.n, r.absolute) for r in pr.reports], res.day.total, res.day.goal)
+                return M.report_reply(res.day, res.added, res.completed_now, streak,
+                                      next_goal(res.day, s, self.cfg.seed_goal), when="včera")
+            res = self._apply(pr.reports)
             if res.completed_now:
                 self.store.set_meta("announced_done_date", today.isoformat())
             streak = compute_streak(self.store.all_days(), today)
@@ -387,17 +412,23 @@ class Trainer:
             return M.SAVED.format(what=f"{'ranný' if session == MORNING else 'večerný'} čas {hhmm}"
                                   " (pripomienka aj výzvy v chate)")
 
+    def _apply_frozen_to_today(self, frozen: bool) -> None:
+        """Zamrazenie/odmrazenie platí aj pre dnešný deň (riadok), nielen do budúcna."""
+        day = self.today_day()
+        if not frozen and day.frozen and not day.done:
+            self.store.save_day(day.copy(frozen=False))
+        if frozen and not day.frozen and not day.done:
+            self.store.save_day(day.copy(frozen=True))
+        self.table_dirty = True
+        self.rem_dirty = True
+
     async def set_frozen(self, frozen: bool) -> str:
         async with self.lock:
             s = self.settings()
             if s.frozen == frozen:
                 return M.ALREADY_FROZEN if frozen else M.ALREADY_RUNNING
             self._save_settings(s.copy(frozen=frozen))
-            day = self.today_day()
-            if not frozen and day.frozen and not day.done:
-                self.store.save_day(day.copy(frozen=False))
-            if frozen and not day.done:
-                self.store.save_day(day.copy(frozen=True))
+            self._apply_frozen_to_today(frozen)
             self.kick()
             log.info("Zamrazenie: %s", frozen)
             if frozen:

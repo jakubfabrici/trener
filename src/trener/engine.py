@@ -7,13 +7,20 @@ sa strácali pri reštarte – stav (koľko výziev už odišlo a kedy) je v DB.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta, timezone
 
 from trener.model import (DONE, EVENING, FAILED, FROZEN, MORNING, SESSIONS, Day, NagState,
                           Report, Settings, Snapshot, hhmm_to_time)
 
 WAKE_FLOOR = dtime(4, 0)      # wake signál pred 04:00 nie je ranné vstávanie
 MAX_NAG_DELAY = timedelta(hours=3)   # po výpadku nedoháňame výzvy staršie ako 3 h
+
+
+def elapsed(later: datetime, earlier: datetime) -> timedelta:
+    """Skutočný uplynutý čas. Dva aware datetime s TÝM ISTÝM tzinfo Python odčítava po
+    nástenných hodinách (pri jesennej zmene času by vyšla hodina navyše/chýbala) –
+    preto cez UTC."""
+    return later.astimezone(timezone.utc) - earlier.astimezone(timezone.utc)
 
 
 # ── hlásenia ─────────────────────────────────────────────────────────────────
@@ -34,7 +41,13 @@ def apply_reports(day: Day, reports: list[Report]) -> ApplyResult:
     m, e = day.morning, day.evening
     for r in reports:
         cur = m if r.session == MORNING else e
-        new = r.n if r.absolute else cur + r.n
+        other = e if r.session == MORNING else m
+        if r.absolute and r.total:
+            new = r.n - other            # „spolu 10“: dnešný súčet = 10
+        elif r.absolute:
+            new = r.n
+        else:
+            new = cur + r.n              # aj záporné n = oprava dole
         new = max(new, 0)
         added[r.session] += new - cur
         if r.session == MORNING:
@@ -103,9 +116,11 @@ def fill_missing_days(days: list[Day], today: date, settings: Settings, seed_goa
     používateľa) – streak sa nestratí, používateľ si ich môže doplniť v tabuľke.
     """
     by_date = {d.date: d for d in days}
-    if not by_date:
+    past = [d for d in by_date if d <= today]
+    if not past:
+        # žiadny dnešný ani minulý deň (prázdna DB alebo len budúce riadky od používateľa)
         return [Day(today, seed_goal, frozen=settings.frozen)]
-    last = max(by_date)
+    last = max(past)
     new: list[Day] = []
     d = last + timedelta(days=1)
     while d <= today:
@@ -158,11 +173,11 @@ def nag_due(now: datetime, settings: Settings, session: str, day: Day, nag: NagS
         start = session_start(now, settings, session)
         if session == MORNING and woke_up and now < start:
             start = now  # wake signál: prvá výzva hneď
-        if now - start > MAX_NAG_DELAY:
+        if elapsed(now, start) > MAX_NAG_DELAY:
             return False
         return now >= start
     assert nag.last_at is not None
-    if now - nag.last_at < interval:
+    if elapsed(now, nag.last_at) < interval:
         return False
     # ďalšie výzvy len kým je fáza „živá“: ráno do večerného času, večer do polnoci
     return True

@@ -307,6 +307,9 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
             bv = getattr(bot, name)
             sv = getattr(synced, name) if synced else None
             tv_eff = tv if tv is not None else 0
+            if name == "goal" and tv is None:
+                row_to_table = True          # prázdny cieľ = nezadaný → ostáva hodnota bota, dopíšeme ju
+                continue
             if name in t.formula_cells:
                 # bunka so vzorcom patrí používateľovi – berieme jej hodnotu, nikdy ju neprepisujeme
                 if tv is not None and tv != bv:

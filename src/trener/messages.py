@@ -17,7 +17,7 @@ def sess(session: str) -> str:
 # ── hlásenia ─────────────────────────────────────────────────────────────────
 
 def report_reply(day: Day, added: dict[str, int], completed_now: bool, streak: int,
-                 next_goal: int) -> str:
+                 next_goal: int, when: str = "dnes") -> str:
     parts = []
     for s in (MORNING, "evening"):
         if added.get(s):
@@ -25,7 +25,9 @@ def report_reply(day: Day, added: dict[str, int], completed_now: bool, streak: i
             parts.append(f"{sign}{added[s]} {sess(s)}")
     head = "✅ " + ", ".join(parts) if parts else "ℹ️ bez zmeny"
     line = (f"{head} → ráno {day.morning}/{day.morning_target} · večer {day.evening}/{day.evening_target}"
-            f" · dnes {day.total}/{day.goal}")
+            f" · {when} {day.total}/{day.goal}")
+    if completed_now and when != "dnes":
+        return f"{line}\n✅ {when.capitalize()} splnený dodatočne. Streak {streak} 🔥"
     if completed_now:
         return (f"{line}\n🎉 Cieľ splnený! Streak {streak} 🔥 Zajtra ťa čaká {next_goal}.")
     if day.done:
@@ -38,7 +40,10 @@ NOT_A_NUMBER = ("Nerozumiem. Napíš číslo – koľko klikov si práve dal (na
 LOOKS_LIKE_TIME = "To vyzerá ako čas alebo dátum, nie počet klikov. Časy sa menia cez /rano HH:MM a /vecer HH:MM."
 ZERO = "Nula sa nepočíta 😤 (ak chceš opraviť, napíš napr. „ráno = 0“)."
 TOO_BIG = "To je priveľa naraz (max 1000). Ak to nie je preklep, pošli to po častiach."
-ERRORS = {"no_number": NOT_A_NUMBER, "looks_like_time": LOOKS_LIKE_TIME, "zero": ZERO, "too_big": TOO_BIG}
+AMBIGUOUS = ("Viac čísel naraz a neviem, ktoré je ktoré. Napíš jedno číslo („5“), alebo ku každému fázu "
+             "(„2 ráno a 3 večer“); dve série po päť napíš ako „2x5“.")
+ERRORS = {"no_number": NOT_A_NUMBER, "looks_like_time": LOOKS_LIKE_TIME, "zero": ZERO, "too_big": TOO_BIG,
+          "ambiguous": AMBIGUOUS}
 
 # ── výzvy v chate ────────────────────────────────────────────────────────────
 

@@ -178,3 +178,16 @@ def test_unfreeze_by_bot_is_not_undone_by_own_status_text():
     p2.days[D].status_text = "zamrazený"; p2.days[D].frozen_by_user = True
     m2 = merge(p2, [(open_day, open_day)], Settings(), {}, D)
     assert m2.days[0].frozen is True
+
+
+def test_empty_goal_cell_keeps_bot_goal():
+    bot = Day(D, 12, 2, 0)
+    p = parse_workbook(render([bot]))
+    p.days[D].goal = None                          # používateľ omylom zmazal Cieľ
+    m = merge(p, [(bot, bot)], Settings(), {}, D)
+    assert m.days[0].goal == 12 and m.to_table
+    # ale prázdne Ráno/Večer = 0 (zmazal hodnotu naschvál)
+    p2 = parse_workbook(render([bot]))
+    p2.days[D].morning = None
+    m2 = merge(p2, [(bot, bot)], Settings(), {}, D)
+    assert m2.days[0].morning == 0
