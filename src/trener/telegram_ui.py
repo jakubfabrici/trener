@@ -49,6 +49,33 @@ def goal_keyboard(current: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+COMMAND_ALIASES = {
+    "start": "start", "help": "help", "pomoc": "help", "napoveda": "help",
+    "stav": "stav", "status": "stav", "dnes": "stav",
+    "zmraz": "zmraz", "zmrazit": "zmraz", "pauza": "zmraz", "stop": "zmraz",
+    "odmraz": "odmraz", "odmrazit": "odmraz", "pokracuj": "odmraz",
+    "ciel": "ciel", "cil": "ciel", "goal": "ciel",
+    "prirastok": "prirastok", "rano": "rano", "vecer": "vecer", "oprav": "oprav", "oprava": "oprav",
+    "tabulka": "tabulka", "sync": "sync", "stats": "stats", "statistika": "stats", "statistiky": "stats",
+}
+
+
+def resolve_command(text: str) -> tuple[str, list[str]] | None:
+    """„/cieľ 10“, „/Ráno 7:00“, „/ciel@bot 12“ → (kanonický príkaz, argumenty). Inak None.
+
+    Telegram rozpozná ako príkaz len ASCII, takže „/cieľ“ by inak prepadlo medzi hlásenia klikov
+    – presne to sa stalo 2. 9. („/cieľ 10“ → +10 klikov)."""
+    t = (text or "").strip()
+    if not t.startswith("/"):
+        return None
+    head, _, rest = t[1:].partition(" ")
+    key = normalize(head.split("@")[0]).strip()
+    name = COMMAND_ALIASES.get(key)
+    if name is None:
+        return ("?", [head])
+    return name, rest.split()
+
+
 def register(app: Application, trainer, owner_chat_id: int) -> None:
     # len nové správy od majiteľa – editované správy (UpdateType.EDITED_MESSAGE) ignorujeme,
     # inak by opravené číslo prišlo druhýkrát a update.message by bolo None
@@ -129,9 +156,22 @@ def register(app: Application, trainer, owner_chat_id: int) -> None:
     async def unknown(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Taký príkaz nepoznám. /help")
 
-    async def on_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    handlers = {"start": start, "help": help_, "stav": stav, "zmraz": zmraz, "odmraz": odmraz, "ciel": ciel,
+                "prirastok": prirastok, "rano": rano, "vecer": vecer, "oprav": oprav, "tabulka": tabulka,
+                "sync": sync, "stats": stats}
+
+    async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = update.message.text or ""
         log.info("Správa: %r", text)
+        cmd = resolve_command(text)
+        if cmd is not None:
+            name, args = cmd
+            if name == "?":
+                await update.message.reply_text(f"Taký príkaz nepoznám ({args[0]}). /help")
+                return
+            ctx.args = args
+            await handlers[name](update, ctx)
+            return
         reply = await trainer.handle_text(text, update.message.date)
         can_undo, can_goal = trainer.undo_available()
         await update.message.reply_text(reply, reply_markup=report_keyboard(can_undo, can_goal)
