@@ -9,14 +9,27 @@ ako jediný zdroj pravdy. Beží v samostatnom LXC kontajneri na Proxmoxe (`tren
 - **Deň má dve fázy**: ráno a večer. Cieľ sa delí na polovice (10 → 5 + 5, 11 → 6 + 5).
   Deň je splnený, keď ráno + večer ≥ cieľ. Po splnenom dni cieľ rastie o *prírastok*
   (default 2), po nesplnenom ostáva rovnaký (žiadne tresty).
-- **Pripomienky (štýl Duolingo)**: bot každý deň o polnoci vytvorí v appke Pripomienky
-  dve pripomienky v zozname „Kliky“ – „💪 Ráno: 5 klikov“ o rannom čase a „💪 Večer: 5 klikov“
-  o večernom. Keď je fáza splnená (z chatu, z tabuľky, odkiaľkoľvek), bot ju **odčiarkne**.
-  Čo si v pripomienke zmeníš ty, platí ďalej:
-  - zmeníš **čas** → nový ranný/večerný čas pre všetky ďalšie dni (aj výzvy v chate),
-  - zmeníš **text** → nová šablóna názvu (číslo klikov sa dosádza samo),
-  - **odškrtneš** ju → fáza sa berie ako splnená a zapíše sa do tabuľky,
-  - **zmažeš** ju → dnes sa už nevytvorí, zajtra normálne.
+- **Budík v kalendári (Apple Kalendár, zoznam „Kliky“)**: bot každý deň vytvorí dva
+  eventy – ranný o `morning_time` a večerný o `evening_time`, každý s **piatimi
+  upozorneniami** (v čase eventu a potom +3, +7, +12 a +20 minút), takže zvoní znova,
+  kým kliky nespravíš. Len čo ich nahlásiš (chat alebo tabuľka), bot **zvyšné
+  upozornenia z eventu odstráni** a event premenuje na „✅ …“. Kalendár „Kliky“ je
+  bežný **iCloud** kalendár – objaví sa sám na iPhone, iPade aj Macu, netreba nikde
+  pridávať žiadny účet ani appku. Čo v evente zmeníš ty, platí ďalej:
+  - posunieš **čas** → nový ranný/večerný čas pre všetky ďalšie dni (aj výzvy v chate),
+  - **premenuješ** ho → nová šablóna názvu (číslo klikov sa dosádza samo),
+  - **zmažeš** ho → dnes sa už nevytvorí, zajtra normálne.
+  O polnoci sa deň uzavrie: event dostane ✅ (splnené), ❌ (nesplnené) alebo ❄️
+  (zamrazené) a stíchne – v kalendári tak máš streak mriežku.
+
+  > Poznámka o hlasitosti: upozornenie z Kalendára je bežná notifikácia – zvoní na
+  > hlasitosti zvonenia, ale **tichý prepínač neprebije** (to na iPhone smie len appka
+  > s oprávnením Critical Alerts od Apple, a Kalendár medzi ne nepatrí). Preto sú
+  > upozornenia opakované. Nastav si raz: *Nastavenia → Oznámenia → Kalendár* → Zvuky
+  > zapnuté a **Časovo citlivé oznámenia** zapnuté (prejde aj cez Sústredenie/Nerušiť),
+  > a *Nastavenia → Zvuky a haptika* → hlasitosť zvonenia hore a **Meniť tlačidlami
+  > vypnuté**.
+
 - **Chat (Telegram)**: kliky hlásiš číslom. „2“ = +2 do aktuálnej fázy (pred večerným časom
   ráno, potom večer); „2 ráno“, „5 večer“, „2 ráno a 3 večer“, „dal som dva ráno“, „2x5“
   (dve série po päť = 10), „-2“ / „uber 2“ (oprava dole), „spolu 10“ (dnešný súčet má byť 10),
@@ -62,23 +75,15 @@ radšej cez Excel, chat alebo Pripomienky.
 `/stav` · `/zmraz` · `/odmraz` · `/ciel N` · `/prirastok N` · `/rano HH:MM` · `/vecer HH:MM`
 · `/oprav ráno|večer N` · `/tabulka` · `/sync` · `/stats` · `/help`
 
-## iPhone: zoznam „Kliky“ v appke Pripomienky (jednorazovo)
+## iPhone: nič nenastavuješ
 
-Radicale je publikované cez Nginx Proxy Manager ako **https://kliky-cal.fabrici.xyz** (HTTPS
-je pre Apple povinné). Na iPhone (iOS 18):
+Kalendár **Kliky** je v tvojom iCloude, takže sa objaví sám v appke Kalendár na všetkých
+zariadeniach. Skontroluj len, že je zapnutý: *Kalendár → Kalendáre → Kliky*.
 
-1. **Nastavenia → Aplikácie → Pripomienky → Účty Pripomienok → Pridať účet → Iné →
-   Pridať účet CalDAV**.
-2. Server: `kliky-cal.fabrici.xyz` · Meno: `jakub` · Heslo: (CALDAV_PASSWORD z
-   `/etc/trener/trener.env`) · Popis: `Kliky`.
-3. Ulož, v účte nechaj zapnuté **Pripomienky**. V appke Pripomienky pribudne zoznam „Kliky“.
-4. Odporúčané: **Nastavenia → Aplikácie → Kalendár → Účty kalendára → Načítať nové dáta →
-   Načítať: každých 15 minút** (CalDAV nemá push; inak sa zmeny sťahujú len pri otvorení
-   appky alebo pri nabíjaní na Wi-Fi).
-
-Pri „Nedá sa overiť účet“: skús v Rozšírených nastaveniach účtu Port 443, Použiť SSL zapnuté
-a URL účtu `https://kliky-cal.fabrici.xyz/jakub/`. V logu Radicale je pri prvom pripojení
-normálne vidieť `301` na `/.well-known/caldav` a `401` pre anonymný PROPFIND.
+Odporúčané jednorazové nastavenia kvôli hlasitosti (žiadna ďalšia appka):
+*Nastavenia → Oznámenia → Kalendár* → Zvuky **zapnuté**, Časovo citlivé oznámenia
+**zapnuté**; *Nastavenia → Zvuky a haptika* → hlasitosť zvonenia hore, „Meniť tlačidlami“
+vypnuté.
 
 Voliteľne: iOS Skratka „Keď sa vypne režim Spánok → Získať obsah z URL
 `https://kliky.fabrici.xyz/wake?token=…`“ – ranná fáza začne hneď po zobudení.

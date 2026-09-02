@@ -1,4 +1,18 @@
-# Pripomienky: prečo to nejde priamo do iCloudu a ako to teda funguje
+# Upozornenia: čo na iPhone naozaj ide a čo nie
+
+## Zvolené riešenie (2. 9. 2026)
+
+**Výlučne Apple Kalendár.** Bot cez CalDAV spravuje iCloud kalendár „Kliky“: dva eventy
+denne, každý s piatimi upozorneniami (0/+3/+7/+12/+20 min). Po nahlásení klikov bot
+zvyšné upozornenia z eventu odstráni, takže zvonenie prestane. Žiadna ďalšia appka,
+žiadny účet navyše, žiadny Home Assistant, žiadne Skratky – iCloud si kalendár
+rozsynchronizuje sám.
+
+Hranica, ktorú Apple nedovolí prekročiť: upozornenie z Kalendára (ani z Pripomienok)
+**neprebije tichý prepínač**. Cez tichý režim a Nerušiť smie zvoniť len appka
+s oprávnením **Critical Alerts** (Home Assistant, Pushover, Pushsafer). Kód pre takýto
+kanál v bote je (`alarm.py`, `ALARM_MODE`), ale je **vypnutý** – zapína sa len na výslovné
+želanie.
 
 ## Krátko
 
