@@ -40,8 +40,12 @@ def _utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+DEFAULT_ALARM_OFFSETS = (0, 3, 7, 12, 20)     # minúty po začiatku eventu – opakované zvonenie
+
+
 def build_event_ics(uid: str, summary: str, start: datetime, minutes: int, alarm: bool = True,
-                    description: str | None = None) -> bytes:
+                    description: str | None = None,
+                    offsets: tuple[int, ...] = DEFAULT_ALARM_OFFSETS) -> bytes:
     now = datetime.now(timezone.utc)
     cal = Calendar()
     cal.add("VERSION", "2.0")
@@ -60,23 +64,27 @@ def build_event_ics(uid: str, summary: str, start: datetime, minutes: int, alarm
     if description:
         ev.add("DESCRIPTION", description)
     if alarm:
-        ev.add_component(_alarm())
+        for off in offsets:
+            ev.add_component(_alarm(off))
     cal.add_component(ev)
     return cal.to_ical()
 
 
-def _alarm() -> Alarm:
+def _alarm(offset_min: int = 0) -> Alarm:
+    """Upozornenie `offset_min` minút po začiatku eventu. Viac takýchto alarmov =
+    opakované zvonenie, kým kliky nespravíš (po nahlásení ich bot z eventu odstráni)."""
     a = Alarm()
     a.add("ACTION", "DISPLAY")
     a.add("DESCRIPTION", "💪 Kliky!")
-    a["TRIGGER"] = vText("PT0S")         # presne v čase začiatku eventu (Apple tento tvar píše tiež)
+    a["TRIGGER"] = vText("PT0S" if offset_min <= 0 else f"PT{int(offset_min)}M")
     a.add("UID", str(uuid.uuid4()).upper())
     a.add("X-WR-ALARMUID", str(uuid.uuid4()).upper())
     return a
 
 
 def apply_event_changes(item: TodoItem, *, summary: str | None = None, start: datetime | None = None,
-                        minutes: int = 15, alarm: bool | None = None) -> bytes:
+                        minutes: int = 15, alarm: bool | None = None,
+                        offsets: tuple[int, ...] = DEFAULT_ALARM_OFFSETS) -> bytes:
     ev = item.vtodo          # pri component="VEVENT" vracia VEVENT
     now = datetime.now(timezone.utc)
 
@@ -93,7 +101,8 @@ def apply_event_changes(item: TodoItem, *, summary: str | None = None, start: da
     if alarm is False:
         ev.subcomponents = [c for c in ev.subcomponents if c.name != "VALARM"]
     elif alarm is True and not any(c.name == "VALARM" for c in ev.subcomponents):
-        ev.add_component(_alarm())
+        for off in offsets:
+            ev.add_component(_alarm(off))
     seq = ev.get("SEQUENCE")
     try:
         seq = int(seq) if seq is not None else 0
@@ -125,11 +134,13 @@ class SyncOutcome:
 
 
 class CalendarSync:
-    def __init__(self, cal: EventCalendar, store, tz: ZoneInfo, minutes: int = 15):
+    def __init__(self, cal: EventCalendar, store, tz: ZoneInfo, minutes: int = 15,
+                 offsets: tuple[int, ...] = DEFAULT_ALARM_OFFSETS):
         self.cal = cal
         self.store = store
         self.tz = tz
         self.minutes = minutes
+        self.offsets = offsets or (0,)
 
     def _start(self, d: date, hhmm: str) -> datetime:
         return datetime.combine(d, hhmm_to_time(hhmm), tzinfo=self.tz)
@@ -204,7 +215,9 @@ class CalendarSync:
             uid = f"kliky-{day.date.isoformat()}-{session}-{uuid.uuid4().hex[:6]}"
             ics = build_event_ics(uid, title, start, self.minutes, alarm=True,
                                   description="Vytvoril virtuálny tréner klikov. Čas alebo názov si "
-                                              "pokojne uprav – prispôsobím sa mu aj ďalšie dni.")
+                                              "pokojne uprav – prispôsobím sa mu aj ďalšie dni. "
+                                              "Upozornenie sa opakuje, kým kliky nenahlásiš.",
+                                  offsets=self.offsets)
             created = self.cal.create(uid, ics)
             st = ReminderState(day.date, session, created.href, uid, created.etag, title,
                                start.strftime("%H:%M"), done, False, 0, n, False)
@@ -229,7 +242,7 @@ class CalendarSync:
             elif not done and not has_alarm:
                 changes["alarm"] = True           # odmrazené / znovu otvorené – nech zase zvoní
         if changes:
-            ics = apply_event_changes(item, minutes=self.minutes, **changes)
+            ics = apply_event_changes(item, minutes=self.minutes, offsets=self.offsets, **changes)
             new = self.cal.put(item, ics)
             st.etag = new.etag
             if "summary" in changes:
@@ -262,7 +275,7 @@ class CalendarSync:
             want = f"{mark} {_strip_mark(item.summary)}".strip()
             try:
                 self.cal.put(item, apply_event_changes(item, summary=want, alarm=False,
-                                                       minutes=self.minutes))
+                                                       minutes=self.minutes, offsets=self.offsets))
                 notes.append(f"{day.date}: {_sk(session)} uzavretý ({want})")
             except Exception as e:  # noqa: BLE001
                 notes.append(f"{day.date} {_sk(session)}: {e}")

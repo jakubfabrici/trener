@@ -166,3 +166,14 @@ def table_info(url: str, day: Day, ok: bool, at: str | None, warnings: list[str]
     if warnings:
         lines.append("⚠️ " + " | ".join(warnings[:3]))
     return "\n".join(lines)
+
+
+# voliteľný hlasný budík (kanál s Critical Alerts) – default vypnutý
+def alarm_title(session: str) -> str:
+    return "☀️ Kliky – ráno" if session == MORNING else "🌙 Kliky – večer"
+
+
+def alarm_text(session: str, day: Day) -> str:
+    if session == MORNING:
+        return f"Ranná dávka: {day.morning_left} klikov (dnes {day.total}/{day.goal})."
+    return f"Večerná dávka: zostáva {day.left} klikov z dnešných {day.goal}."

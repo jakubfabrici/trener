@@ -38,9 +38,12 @@ def test_creates_morning_and_evening_alarm_events():
     assert event_start(m, TZ).strftime("%H:%M") == "07:00"
     assert event_start(e, TZ).strftime("%H:%M") == "19:20"
     assert has_alarm(m) and has_alarm(e)
-    # alarm presne v čase začiatku a event je „voľný“ (neblokuje kalendár)
-    ics = build_event_ics("u", "x", datetime(2026, 9, 2, 7, tzinfo=TZ), 15)
+    # prvý alarm presne v čase začiatku, ďalšie opakovane; event je „voľný“
+    ics = build_event_ics("u", "x", datetime(2026, 9, 2, 7, tzinfo=TZ), 25)
     assert b"TRIGGER:PT0S" in ics and b"TRANSP:TRANSPARENT" in ics
+    for off in (3, 7, 12, 20):
+        assert f"TRIGGER:PT{off}M".encode() in ics
+    assert ics.count(b"BEGIN:VALARM") == 5
     # opakovaný sync nič nemení
     cs.sync(Day(D, 10), Settings())
     assert len(cal.list()) == 2
@@ -138,3 +141,22 @@ def test_apple_style_event_round_trip_keeps_unknown_props():
     assert event_start(item, TZ).strftime("%H:%M") == "06:30"
     out = apply_event_changes(item, summary="✅ 💪 Ráno: 5 klikov", alarm=False)
     assert b"X-APPLE-CREATOR-IDENTITY:x" in out and b"SEQUENCE:3" in out and b"VALARM" not in out
+
+
+def test_reported_reps_silence_the_remaining_alarms():
+    """Kľúčová vlastnosť: keď kliky nahlásiš, zvyšné zvonenia z eventu zmiznú."""
+    store, cal, cs = make()
+    cs.sync(Day(D, 10), Settings())
+    m = by(cal, "Ráno")
+    assert sum(1 for c in m.vtodo.subcomponents if c.name == "VALARM") == 5
+    cs.sync(Day(D, 10, morning=5), Settings())          # ranná fáza hotová
+    m = by(cal, "Ráno")
+    assert not has_alarm(m) and m.summary.startswith("✅")
+    assert sum(1 for c in by(cal, "Večer").vtodo.subcomponents if c.name == "VALARM") == 5
+
+
+def test_alarm_offsets_are_configurable():
+    store, cal, cs = make()
+    cs.offsets = (0, 5)
+    cs.sync(Day(D, 10), Settings())
+    assert sum(1 for c in by(cal, "Ráno").vtodo.subcomponents if c.name == "VALARM") == 2

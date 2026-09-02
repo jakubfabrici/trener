@@ -21,6 +21,7 @@ from telegram.ext import Application, ApplicationBuilder
 
 from trener import config as C
 from trener import messages as M
+from trener.alarm import send_alarm
 from trener.caldav_todo import TodoList
 from trener.calendar_sync import CalendarSync, EventCalendar
 from trener.engine import (WAKE_FLOOR, Snapshot, apply_reports, compute_streak, default_session, elapsed,
@@ -48,7 +49,8 @@ class Trainer:
         self.bridge = ShortcutBridge(store, cfg.tz, cfg.reminders_list) \
             if cfg.reminders_mode == "shortcuts" else None
         self.calendar = calendar
-        self.cal_sync = CalendarSync(calendar, store, cfg.tz, cfg.calendar_minutes) if calendar else None
+        self.cal_sync = CalendarSync(calendar, store, cfg.tz, cfg.calendar_minutes,
+                                     cfg.calendar_alarms) if calendar else None
         self.cal_ok: bool | None = None if calendar else None
         self.cal_dirty = True
         self.last_cal_sync: datetime | None = None
@@ -122,6 +124,7 @@ class Trainer:
         snap.update({"ok": True, "time": self.now().isoformat(), "started": self.started_at.isoformat(),
                      "table": {"ok": self.table_ok, "busy": self.table_busy, "last_sync": self.last_table_sync,
                                "url": self.cfg.table_url, "warnings": self.table_warnings[:5]},
+                     "alarm": {"mode": self.cfg.alarm_mode, "priority": self.cfg.alarm_priority},
                      "calendar": {"mode": self.cfg.calendar_mode, "name": self.cfg.calendar_name,
                                   "ok": self.cal_ok, "last_sync": self.last_cal_sync},
                      "reminders": {"mode": self.cfg.reminders_mode,
@@ -521,19 +524,12 @@ class Trainer:
             k = nag.sent + 1
             log.info("Výzva %s %d/%d (deň %s/%s).", a.session, k, s.nag_max, day.total, day.goal)
             await self.send(M.nag(a.session, day, k, s.nag_max))
-            if k == 1 and self.cfg.ha_alarm_url:
-                await self._ha_alarm(M.nag(a.session, day, k, s.nag_max))
+            if k == 1 and self.cfg.alarm_mode != "off":
+                # hlasný budík len raz na fázu, presne v čase eventu v kalendári
+                await send_alarm(self.cfg, M.alarm_text(a.session, day),
+                                 title=M.alarm_title(a.session))
             nag.sent, nag.last_at = k, now
             self.store.save_nag(nag)
-
-    async def _ha_alarm(self, text: str) -> None:
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=10, verify=False) as client:  # HA na LAN IP, vlastný cert
-                r = await client.post(self.cfg.ha_alarm_url, json={"message": text})
-                log.info("HA budík (HTTP %s).", r.status_code)
-        except Exception as e:  # noqa: BLE001
-            log.warning("HA budík zlyhal: %s", e)
 
     # ── zmeny stavu (z chatu / pripomienok) ─────────────────────────────────
     def _apply(self, reports: list[Report], day: Day | None = None):

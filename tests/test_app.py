@@ -44,10 +44,13 @@ class Harness:
                      smb_password="", local_table_path=tmp / "kliky.xlsx", table_sync_seconds=120,
                      calendar_mode="off", calendar_url="https://caldav.icloud.com/", calendar_user=None,
                      calendar_password=None, calendar_name="Kliky", calendar_color="#FF6B35",
-                     calendar_minutes=15, calendar_sync_seconds=120,
+                     calendar_minutes=25, calendar_alarms=(0, 3, 7, 12, 20), calendar_sync_seconds=120,
                      reminders_mode="caldav", reminders_list="Kliky", shortcut_token="tok",
                      caldav_url=None, caldav_username=None, caldav_password=None, caldav_list="Kliky",
-                     reminders_sync_seconds=120, web_port=0, wake_token=None, ha_alarm_url=None,
+                     reminders_sync_seconds=120, web_port=0, wake_token=None,
+                     alarm_mode="off", pushover_token=None, pushover_user=None, pushover_device=None,
+                     alarm_priority=2, alarm_sound="persistent", alarm_retry=60, alarm_expire=600,
+                     alarm_webhook_url=None,
                      seed_goal=12, seed_increment=2, seed_morning="07:00", seed_evening="19:20", tick_seconds=30)
         self.cfg = cfg
         self.store = Store(cfg.state_db)

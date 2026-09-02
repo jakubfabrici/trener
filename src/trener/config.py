@@ -42,6 +42,7 @@ class Config:
     calendar_name: str
     calendar_color: str
     calendar_minutes: int
+    calendar_alarms: tuple[int, ...]
     calendar_sync_seconds: int
     # pripomienky (Radicale CalDAV)
     caldav_url: str | None
@@ -52,8 +53,16 @@ class Config:
     # web (health + wake)
     web_port: int
     wake_token: str | None
-    # voliteľný kritický budík cez Home Assistant
-    ha_alarm_url: str | None
+    # hlasný budík (Critical Alerts) – pushover | pushsafer | webhook | off
+    alarm_mode: str
+    pushover_token: str | None
+    pushover_user: str | None
+    pushover_device: str | None
+    alarm_priority: int
+    alarm_sound: str
+    alarm_retry: int
+    alarm_expire: int
+    alarm_webhook_url: str | None
     # východiskové hodnoty pri prvom štarte (kým tabuľka neexistuje)
     seed_goal: int
     seed_increment: int
@@ -81,6 +90,14 @@ def load() -> Config:
     cal_mode = (_env("CALENDAR_MODE", "icloud") or "icloud").strip().lower()
     if cal_mode not in ("icloud", "off"):
         raise SystemExit(f"CALENDAR_MODE musí byť 'icloud' alebo 'off' (je {cal_mode!r}).")
+    alarm_mode = (_env("ALARM_MODE", "off") or "off").strip().lower()
+    if alarm_mode not in ("off", "pushover", "pushsafer", "webhook"):
+        raise SystemExit(f"ALARM_MODE musí byť off/pushover/pushsafer/webhook (je {alarm_mode!r}).")
+    if alarm_mode in ("pushover", "pushsafer") and not (_env("PUSHOVER_USER")
+                                                        and (_env("PUSHOVER_TOKEN") or alarm_mode == "pushsafer")):
+        raise SystemExit(f"ALARM_MODE={alarm_mode} vyžaduje PUSHOVER_USER (a PUSHOVER_TOKEN pre pushover).")
+    if alarm_mode == "webhook" and not (_env("ALARM_WEBHOOK_URL") or _env("HA_ALARM_WEBHOOK_URL")):
+        raise SystemExit("ALARM_MODE=webhook vyžaduje ALARM_WEBHOOK_URL.")
     mode = (_env("REMINDERS_MODE", "shortcuts") or "shortcuts").strip().lower()
     if mode not in ("shortcuts", "caldav", "off"):
         raise SystemExit(f"REMINDERS_MODE musí byť 'shortcuts', 'caldav' alebo 'off' (je {mode!r}).")
@@ -104,7 +121,9 @@ def load() -> Config:
         calendar_password=_env("ICLOUD_APP_PASSWORD"),
         calendar_name=_env("CALENDAR_NAME", "Kliky"),
         calendar_color=_env("CALENDAR_COLOR", "#FF6B35"),
-        calendar_minutes=int(_env("CALENDAR_EVENT_MINUTES", "15")),
+        calendar_minutes=int(_env("CALENDAR_EVENT_MINUTES", "25")),
+        calendar_alarms=tuple(sorted({max(int(x), 0) for x in
+                                      (_env("CALENDAR_ALARMS", "0,3,7,12,20") or "0").split(",") if x.strip()})),
         calendar_sync_seconds=int(_env("CALENDAR_SYNC_SECONDS", "120")),
         reminders_mode=mode,
         reminders_list=_env("REMINDERS_LIST", _env("CALDAV_LIST", "Kliky")),
@@ -116,7 +135,15 @@ def load() -> Config:
         reminders_sync_seconds=int(_env("REMINDERS_SYNC_SECONDS", "120")),
         web_port=int(_env("WEB_PORT", "8790")),
         wake_token=_env("WAKE_WEBHOOK_TOKEN"),
-        ha_alarm_url=_env("HA_ALARM_WEBHOOK_URL"),
+        alarm_mode=alarm_mode,
+        pushover_token=_env("PUSHOVER_TOKEN"),
+        pushover_user=_env("PUSHOVER_USER"),
+        pushover_device=_env("PUSHOVER_DEVICE"),
+        alarm_priority=int(_env("ALARM_PRIORITY", "2")),
+        alarm_sound=_env("ALARM_SOUND", "persistent"),
+        alarm_retry=int(_env("ALARM_RETRY", "60")),
+        alarm_expire=int(_env("ALARM_EXPIRE", "600")),
+        alarm_webhook_url=_env("ALARM_WEBHOOK_URL") or _env("HA_ALARM_WEBHOOK_URL"),
         seed_goal=int(_env("SEED_GOAL", "10")),
         seed_increment=int(_env("SEED_INCREMENT", "2")),
         seed_morning=_env("SEED_MORNING_TIME", "07:00"),
