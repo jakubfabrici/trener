@@ -19,6 +19,18 @@ class Conflict(Exception):
     """Súbor sa zmenil odkedy sme ho čítali."""
 
 
+class Busy(Exception):
+    """Súbor drží iný klient (Excel má súbor otvorený) – nie je to porucha, skús neskôr."""
+
+
+STATUS_SHARING_VIOLATION = 0xC0000043
+
+
+def _is_sharing_violation(e: BaseException) -> bool:
+    import errno as _errno
+    return getattr(e, "ntstatus", None) == STATUS_SHARING_VIOLATION or getattr(e, "errno", None) == _errno.EPERM
+
+
 @dataclass(frozen=True)
 class Stamp:
     mtime: float
@@ -126,6 +138,14 @@ class SmbBackend:
                 with smbclient.open_file(tmp, mode="wb", **self._cred()) as f:
                     f.write(data)
                 smbclient.replace(tmp, self.unc, **self._cred())
+            except OSError as e:
+                try:
+                    smbclient.remove(tmp, **self._cred())
+                except Exception:  # noqa: BLE001
+                    pass
+                if _is_sharing_violation(e):
+                    raise Busy("súbor má otvorený iný program (Excel)") from e
+                raise
             except Exception:
                 try:
                     smbclient.remove(tmp, **self._cred())
@@ -134,7 +154,7 @@ class SmbBackend:
                 raise
             st = smbclient.stat(self.unc, **self._cred())
             return Stamp(st.st_mtime, st.st_size)
-        except Conflict:
+        except (Conflict, Busy):
             raise
         except Exception:
             self._reset()

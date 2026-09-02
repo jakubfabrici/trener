@@ -26,7 +26,7 @@ from trener.engine import (WAKE_FLOOR, Snapshot, apply_reports, compute_streak, 
 from trener.model import EVENING, MORNING, Day, Report, Settings
 from trener.parsing import parse_message
 from trener.reminders import ReminderSync
-from trener.smb_io import Conflict, make_backend
+from trener.smb_io import Busy, Conflict, make_backend
 from trener.store import Store
 from trener.table import TableCorrupt, merge, parse_workbook, render_workbook
 from trener.telegram_ui import BOT_COMMANDS, register
@@ -52,6 +52,12 @@ class Trainer:
         self.table_stamp = None
         self.table_fail = 0
         self.table_alerted = False
+        self.table_busy = False
+        self.table_busy_logged: datetime | None = None
+        self.table_retry_at: datetime | None = None
+        self._table_inflight = False
+        self._rem_inflight = False
+        self._table_failed_this_tick = False
         self.woke_date: date | None = None
         self.started_at = self.now()
 
@@ -96,8 +102,8 @@ class Trainer:
             "today": None if d is None else {"date": d.date.isoformat(), "goal": d.goal,
                                              "morning": d.morning, "evening": d.evening, "done": d.done},
             "frozen": self.settings().frozen,
-            "table": {"ok": self.table_ok, "last_sync": self.last_table_sync, "url": self.cfg.table_url,
-                      "warnings": self.table_warnings[:5]},
+            "table": {"ok": self.table_ok, "busy": self.table_busy, "last_sync": self.last_table_sync,
+                      "url": self.cfg.table_url, "warnings": self.table_warnings[:5]},
             "reminders": {"enabled": self.rem is not None, "ok": self.rem_ok, "last_sync": self.last_rem_sync},
         }
 
@@ -132,16 +138,22 @@ class Trainer:
     async def tick(self) -> None:
         async with self.lock:
             now = self.now()
+            self._table_failed_this_tick = False
             await self._rollover_if_needed(now)
-            if self.table_dirty or self._due(self.last_table_sync, self.cfg.table_sync_seconds):
+            if self._table_wanted(now):
                 await self._sync_table()
             if self.rem and (self.rem_dirty or self._due(self.last_rem_sync, self.cfg.reminders_sync_seconds)):
                 await self._sync_reminders()
-            if self.table_dirty:
+            if self.table_dirty and not self._table_failed_this_tick and self._table_wanted(now):
                 # zmeny z Pripomienok (odškrtnutie, nový čas/názov) hneď do tabuľky
                 await self._sync_table()
             await self._check_completion("tabuľka/Pripomienky")
             await self._nags(now)
+
+    def _table_wanted(self, now: datetime) -> bool:
+        if self.table_retry_at is not None and now < self.table_retry_at:
+            return False           # Excel drží súbor / zlyhanie – nebúšime každých 30 s
+        return self.table_dirty or self._due(self.last_table_sync, self.cfg.table_sync_seconds)
 
     def _due(self, last: datetime | None, seconds: int) -> bool:
         return last is None or elapsed(self.now(), last) >= timedelta(seconds=seconds)
@@ -176,9 +188,22 @@ class Trainer:
 
     # ── tabuľka ─────────────────────────────────────────────────────────────
     async def _sync_table(self) -> None:
+        if self._table_inflight:
+            log.warning("Tabuľka: predchádzajúca operácia ešte beží (visí sieť?) – preskakujem.")
+            return
+        self._table_inflight = True
+        try:
+            await self._sync_table_inner()
+        finally:
+            self._table_inflight = False
+
+    async def _sync_table_inner(self) -> None:
         today = self.now().date()
         try:
-            res = await asyncio.to_thread(self.backend.read)
+            res = await asyncio.wait_for(asyncio.to_thread(self.backend.read), timeout=30)
+        except asyncio.TimeoutError:
+            await self._table_failure("čítanie trvá pridlho (NAS neodpovedá)")
+            return
         except Exception as e:  # noqa: BLE001
             await self._table_failure(f"čítanie zlyhalo: {e}")
             return
@@ -192,9 +217,11 @@ class Trainer:
                 return
         settings_before = self.settings()
         m = merge(parsed, self.store.days_with_synced(), settings_before,
-                  self.store.get_settings_synced(), today)
+                  self.store.get_settings_synced(), today, self.cfg.seed_goal)
         # prevezmi zmeny z tabuľky do lokálneho stavu
         before_today = self.store.get_day(today)
+        for d in m.deleted_days:
+            self.store.delete_day(d)
         for day in m.days:
             cur = self.store.get_day(day.date)
             if cur != day:
@@ -207,23 +234,40 @@ class Trainer:
                 log.info("Zamrazenie zmenené v tabuľke: %s", m.settings.frozen)
                 # dnešný riadok sa zmenil → do tabuľky
                 m = merge(parsed, self.store.days_with_synced(), m.settings,
-                          self.store.get_settings_synced(), today)
+                          self.store.get_settings_synced(), today, self.cfg.seed_goal)
         for note in m.from_table:
             log.info("Tabuľka → bot: %s", note)
         if m.to_table:
             streaks = {d.date: streak_after(m.days, d.date, today) for d in m.days}
-            extras = {d: v.extra for d, v in parsed.days.items()} if parsed else {}
-            data = await asyncio.to_thread(render_workbook, existing, m.days, m.settings, streaks, today, extras)
+            data = await asyncio.to_thread(render_workbook, existing, m.days, m.settings, streaks, today, parsed)
             try:
-                stamp = await asyncio.to_thread(self.backend.write, data, stamp)
+                stamp = await asyncio.wait_for(asyncio.to_thread(self.backend.write, data, stamp), timeout=30)
                 log.info("Tabuľka zapísaná (%d dní).", len(m.days))
             except Conflict:
                 log.info("Tabuľka sa medzitým zmenila – skúsim v ďalšom ticku.")
                 self.table_dirty = True
                 return
+            except Busy:
+                # Excel má súbor otvorený – čítať vieme, zapíšeme neskôr; žiadny poplach
+                now = self.now()
+                if self.table_busy_logged is None or elapsed(now, self.table_busy_logged) > timedelta(hours=1):
+                    log.info("Tabuľka: súbor má otvorený iný program – zapíšem, keď ho zavrie.")
+                    self.table_busy_logged = now
+                self.table_busy = True
+                self.table_dirty = True
+                self.table_retry_at = now + timedelta(seconds=self.cfg.table_sync_seconds)
+                self.table_ok = True
+                self.last_table_sync = now
+                self._table_failed_this_tick = True
+                return
+            except asyncio.TimeoutError:
+                await self._table_failure("zápis trvá pridlho (NAS neodpovedá)")
+                return
             except Exception as e:  # noqa: BLE001
                 await self._table_failure(f"zápis zlyhal: {e}")
                 return
+        self.table_busy = False
+        self.table_retry_at = None
         for day in m.days:
             self.store.mark_day_synced(day)
         self.store.mark_settings_synced(m.settings)
@@ -252,6 +296,8 @@ class Trainer:
     async def _table_failure(self, why: str) -> None:
         self.table_fail += 1
         self.table_ok = False
+        self._table_failed_this_tick = True
+        self.table_retry_at = self.now() + timedelta(seconds=min(self.cfg.table_sync_seconds, 60 * min(self.table_fail, 5)))
         if self.table_fail in (1, 5) or self.table_fail % 30 == 0:
             log.warning("Tabuľka (%s): %s [pokus %d]", self.backend.describe(), why, self.table_fail)
         if self.table_fail == 5 and not self.table_alerted and not self.settings().frozen:
@@ -262,15 +308,25 @@ class Trainer:
     async def _sync_reminders(self, day: Day | None = None, allow_create: bool = True) -> None:
         if not self.rem:
             return
+        if self._rem_inflight:
+            log.warning("Pripomienky: predchádzajúci sync ešte beží – preskakujem.")
+            return
         today = day if day is not None else self.today_day()
         settings = self.settings()
+        self._rem_inflight = True
         try:
-            out = await asyncio.to_thread(self.rem.sync, today, settings, allow_create)
+            out = await asyncio.wait_for(asyncio.to_thread(self.rem.sync, today, settings, allow_create), timeout=40)
+        except asyncio.TimeoutError:
+            log.warning("Pripomienky: sync trvá pridlho (Radicale neodpovedá).")
+            self.rem_ok = False
+            return
         except Exception as e:  # noqa: BLE001 – pripomienky nesmú zhodiť tick (výzvy, oznámenia)
             if self.rem_ok is not False:
                 log.warning("Pripomienky: neočakávaná chyba: %s", e, exc_info=True)
             self.rem_ok = False
             return
+        finally:
+            self._rem_inflight = False
         for n in out.notes:
             log.info("Pripomienky: %s", n)
         if out.errors:
@@ -472,7 +528,7 @@ class Trainer:
         async with self.lock:
             day = self.today_day()
             at = self.last_table_sync.strftime("%d.%m. %H:%M") if self.last_table_sync else None
-            return M.table_info(self.cfg.table_url, day, self.table_ok, at, self.table_warnings)
+            return M.table_info(self.cfg.table_url, day, self.table_ok, at, self.table_warnings, self.table_busy)
 
 
 # ── štart procesu ─────────────────────────────────────────────────────────────

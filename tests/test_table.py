@@ -13,9 +13,9 @@ D = date(2026, 9, 2)
 Y = date(2026, 9, 1)
 
 
-def render(days, settings=Settings(), existing=None, today=D, extras=None):
+def render(days, settings=Settings(), existing=None, today=D, parsed=None):
     streaks = {d.date: 0 for d in days}
-    return render_workbook(existing, days, settings, streaks, today, extras)
+    return render_workbook(existing, days, settings, streaks, today, parsed)
 
 
 def test_round_trip():
@@ -133,15 +133,87 @@ def test_corrupt_file_raises_and_is_never_overwritten():
         parse_workbook(render([Day(D, 10)])[:500])
 
 
-def test_render_preserves_foreign_sheet_and_extra_columns():
+def test_render_preserves_foreign_sheet_extra_columns_and_foreign_rows():
     wb = Workbook(); ws = wb.active; ws.title = "Moje"; ws["A1"] = "moje veci"
     buf = io.BytesIO(); wb.save(buf)
-    data = render([Day(D, 10)], existing=buf.getvalue(), extras={D: {9: "extra"}})
-    wb2 = load_workbook(io.BytesIO(data))
-    assert "Moje" in wb2.sheetnames and wb2["Moje"]["A1"].value == "moje veci"
-    assert wb2[SHEET_DAYS].cell(2, 9).value == "extra"
+    data = render([Day(D, 10)], existing=buf.getvalue())
+    # používateľ pridá vlastný stĺpec, komentár-riadok s nečitateľným dátumom a vzorec
+    wb2 = load_workbook(io.BytesIO(data)); ws2 = wb2[SHEET_DAYS]
+    ws2.cell(1, 9, "Nálada"); ws2.cell(2, 9, "super")
+    ws2.cell(3, 1, "poznámka pod tabuľkou"); ws2.cell(3, 8, "toto nie je deň")
+    buf2 = io.BytesIO(); wb2.save(buf2)
+    p = parse_workbook(buf2.getvalue())
+    assert p.days[D].extra == {9: "super"} and p.foreign_rows == 1 and p.warnings
+    data3 = render([Day(D, 10, 3, 0), Day(Y, 8, 4, 4)], existing=buf2.getvalue(), parsed=p)
+    wb3 = load_workbook(io.BytesIO(data3)); ws3 = wb3[SHEET_DAYS]
+    assert "Moje" in wb3.sheetnames and wb3["Moje"]["A1"].value == "moje veci"
+    assert ws3.cell(2, 9).value == "super" and ws3.cell(2, 3).value == 3        # extra stĺpec ostal, Ráno = 3
+    assert ws3.cell(3, 1).value == "poznámka pod tabuľkou"                      # cudzí riadok nedotknutý
+    assert cell_date(ws3.cell(4, 1).value) == Y                                # nový deň dopísaný na koniec
+
+
+def test_user_moved_and_inserted_columns_are_found_by_header():
+    data = render([Day(D, 10, 2, 0)])
+    wb = load_workbook(io.BytesIO(data)); ws = wb[SHEET_DAYS]
+    ws.insert_cols(3)                       # nový stĺpec medzi Cieľ a Ráno
+    ws.cell(1, 3, "Váha"); ws.cell(2, 3, 81.5)
+    buf = io.BytesIO(); wb.save(buf)
+    p = parse_workbook(buf.getvalue())
+    assert p.layout["morning"] == 4 and p.days[D].morning == 2 and p.days[D].goal == 10
+    data2 = render([Day(D, 10, 5, 0)], existing=buf.getvalue(), parsed=p)
+    ws2 = load_workbook(io.BytesIO(data2))[SHEET_DAYS]
+    assert ws2.cell(2, 3).value == 81.5 and ws2.cell(2, 4).value == 5 and ws2.cell(1, 4).value == "Ráno"
+
+
+def test_formula_cell_is_never_overwritten_on_render():
+    data = render([Day(D, 10, 0, 0)])
+    wb = load_workbook(io.BytesIO(data)); wb[SHEET_DAYS].cell(2, 3, "=2+3")
+    buf = io.BytesIO(); wb.save(buf)
+    p = parse_workbook(buf.getvalue())
+    data2 = render([Day(D, 10, 5, 0)], existing=buf.getvalue(), parsed=p)
+    assert load_workbook(io.BytesIO(data2))[SHEET_DAYS].cell(2, 3).value == "=2+3"
+
+
+def test_deleted_row_is_deleted_from_bot_but_not_when_table_emptied():
+    a, b = Day(Y, 10, 4, 6), Day(D, 12, 0, 0)
+    p = parse_workbook(render([a, b]))
+    del p.days[Y]                                     # používateľ zmazal včerajšok
+    m = merge(p, [(a, a), (b, b)], Settings(), {}, D)
+    assert m.deleted_days == [Y] and [d.date for d in m.days] == [D]
+    p2 = parse_workbook(render([a, b]))
+    p2.days.clear()                                   # tabuľka náhle prázdna → nič nemažeme, dopíšeme
+    m2 = merge(p2, [(a, a), (b, b)], Settings(), {}, D)
+    assert m2.deleted_days == [] and len(m2.days) == 2 and m2.to_table
+    # dnešok sa nikdy nemaže
+    p3 = parse_workbook(render([a, b])); del p3.days[D]
+    assert merge(p3, [(a, a), (b, b)], Settings(), {}, D).deleted_days == []
+
+
+def test_new_row_without_goal_inherits_previous_goal():
+    a = Day(Y, 12, 6, 6)
+    p = parse_workbook(render([a]))
+    p.days[D] = type(p.days[Y])(D, None, 3, 0, "", "", False, set(), {}, 3, "")
+    m = merge(p, [(a, a)], Settings(), {}, D, default_goal=10)
+    assert m.days[1].goal == 12 and m.days[1].status(D) == "open"
+
+
+def test_note_starting_with_equals_is_text_and_dv_not_duplicated():
+    data = render([Day(D, 10, note="=fajn")])
+    wb = load_workbook(io.BytesIO(data))
+    assert wb[SHEET_DAYS].cell(2, 8).value == "=fajn" and wb[SHEET_DAYS].cell(2, 8).data_type == "s"
     p = parse_workbook(data)
-    assert p.days[D].extra == {9: "extra"}
+    assert p.days[D].note == "=fajn"
+    for _ in range(3):
+        data = render([Day(D, 10)], existing=data, parsed=parse_workbook(data))
+    assert len(load_workbook(io.BytesIO(data))[SHEET_SETTINGS].data_validations.dataValidation) == 1
+
+
+def test_user_edit_on_done_day_refreshes_total():
+    a = Day(Y, 10, 4, 6)
+    p = parse_workbook(render([a]))
+    p.days[Y].morning = 5                              # ✅ ostáva, ale Spolu musí byť 11
+    m = merge(p, [(a, a)], Settings(), {}, D)
+    assert m.days[0].total == 11 and m.to_table
 
 
 def test_no_write_when_nothing_changed():

@@ -1,27 +1,27 @@
 """Tabuľka „kliky.xlsx“ – zdroj pravdy pre dni a nastavenia.
 
 Hárok „Kliky“: Dátum | Cieľ | Ráno | Večer | Spolu | Stav | Streak | Poznámka
+  - stĺpce sa hľadajú PODĽA HLAVIČKY (používateľ si môže stĺpce presúvať a pridávať vlastné),
   - Cieľ, Ráno, Večer, Poznámka: píše používateľ aj bot (3-cestný merge, tabuľka vyhráva),
-  - Spolu, Stav, Streak: počíta bot (prepíše sa pri každom zápise); do „Stav“ môže
-    používateľ napísať „zamrazený“ a bot to prevezme ako zamrazený deň.
-Hárok „Nastavenia“: názov | hodnota | popis (rovnaký merge).
-Hárok „Návod“: text.
+  - Spolu, Stav, Streak: počíta bot; do „Stav“ môže používateľ napísať „zamrazený“,
+  - bot upravuje hárok NA MIESTE: cudzie riadky, stĺpce, komentáre a vzorce nechá tak,
+    nové dni dopíše na koniec; riadok, ktorý používateľ zmazal, zmaže aj u seba
+    (okrem dnešného a prípadu, keď je tabuľka náhle celá prázdna).
+Hárok „Nastavenia“: názov | hodnota | popis (rovnaký merge). Hárok „Návod“: text.
 
-Všetko tu pracuje s bajtmi (BytesIO) – žiadny prístup na sieť, takže je to
-plne testovateľné. Súbor sa upravuje „na mieste“ (zachovajú sa cudzie stĺpce
-a hárky), ale riadky dní sa prepíšu zoradené podľa dátumu.
+Všetko tu pracuje s bajtmi (BytesIO) – žiadny prístup na sieť, plne testovateľné.
 """
 from __future__ import annotations
 
 import io
 import re
+import unicodedata
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from trener.model import (DONE, FAILED, FROZEN, FROZEN_WORDS, OPEN, STATUS_LABEL, Day, Settings,
@@ -31,7 +31,11 @@ SHEET_DAYS = "Kliky"
 SHEET_SETTINGS = "Nastavenia"
 SHEET_HELP = "Návod"
 DAY_HEADERS = ["Dátum", "Cieľ", "Ráno", "Večer", "Spolu", "Stav", "Streak", "Poznámka"]
-COL = {name: i + 1 for i, name in enumerate(DAY_HEADERS)}   # 1-based
+KEYS = ["date", "goal", "morning", "evening", "total", "status", "streak", "note"]
+HEADER_KEY = dict(zip(DAY_HEADERS, KEYS))
+DEFAULT_LAYOUT = {k: i + 1 for i, k in enumerate(KEYS)}      # 1-based
+COL = {h: i + 1 for i, h in enumerate(DAY_HEADERS)}          # spätná kompatibilita (testy)
+USER_COLS = ("goal", "morning", "evening")
 
 # (kľúč v Settings, popisok v tabuľke, popis)
 SETTINGS_ROWS = [
@@ -58,10 +62,12 @@ HELP_TEXT = [
     "• Deň je splnený, keď Ráno + Večer ≥ Cieľ. Rozdelenie cieľa je polovica ráno (zaokrúhlená nahor) a zvyšok večer.",
     "• Ak do stĺpca Stav napíšeš „zamrazený“, deň sa nepočíta a neprerušuje streak (napr. choroba).",
     "• Bot číta tabuľku každé 2 minúty. Čo zapíšeš sem, platí – nemusíš mu nič písať do chatu.",
+    "• Stĺpce môžeš presúvať a pridávať vlastné (bot ich hľadá podľa názvu v prvom riadku a cudzie nechá tak).",
+    "• Riadok, ktorý zmažeš, zmaže bot aj u seba (dnešný riadok si vždy dorobí).",
     "• Keď je v hárku Nastavenia „Zamrazené“ = ÁNO, bot nič nepripomína (chat ani Pripomienky), ale tabuľku ďalej sleduje.",
     "• Časy zadávaj ako HH:MM (napr. 07:00). Zmena času pripomienky v appke Pripomienky sa sem prepíše sama.",
-    "• Súbor ukladaj v Exceli priamo sem (na sieťový disk). Numbers na iPhone/Macu vie súbor otvoriť, ale ukladá kópiu – zmeny radšej píš cez Excel, cez chat alebo cez Pripomienky.",
-    "• Neprepisuj riadky počas toho, ako bot zapisuje (zapisuje len keď sa niečo zmenilo, atomicky cez dočasný súbor).",
+    "• Súbor ukladaj v Exceli priamo sem (na sieťový disk). Kým ho máš otvorený, bot počká a zapíše, keď ho zavrieš.",
+    "• Numbers na iPhone/Macu súbor otvorí, ale ukladá kópiu – zmeny radšej píš cez Excel, chat alebo Pripomienky.",
 ]
 
 
@@ -83,7 +89,9 @@ class RowVals:
     status_text: str
     frozen_by_user: bool
     formula_cells: set[str] = field(default_factory=set)   # 'goal'/'morning'/'evening' so vzorcom
-    extra: dict[int, object] = field(default_factory=dict) # stĺpce za H (col index → hodnota)
+    extra: dict[int, object] = field(default_factory=dict) # cudzie stĺpce (index → hodnota)
+    row: int = 0                                           # riadok v hárku
+    total_text: str = ""
 
 
 @dataclass
@@ -93,9 +101,17 @@ class Parsed:
     warnings: list[str]
     has_days_sheet: bool
     has_settings_sheet: bool
+    layout: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_LAYOUT))
+    max_row: int = 1
+    foreign_rows: int = 0           # riadky, ktorým nerozumieme (nechávame ich tak)
 
 
 # ── konverzie buniek ─────────────────────────────────────────────────────────
+
+def _norm(s) -> str:
+    s = "" if s is None else str(s)
+    return "".join(c for c in unicodedata.normalize("NFD", s.strip().lower()) if unicodedata.category(c) != "Mn")
+
 
 def cell_int(v) -> int | None:
     """Číslo z bunky: 5, 5.0, '5', ' 5 ', '5 klikov' → 5; prázdne → None."""
@@ -145,8 +161,8 @@ def cell_bool(v) -> bool | None:
         return v
     if isinstance(v, (int, float)):
         return bool(v)
-    s = str(v).strip().lower()
-    if s in ("ano", "áno", "yes", "y", "true", "1", "x", "✓", "✔", "da"):
+    s = _norm(v)
+    if s in ("ano", "yes", "y", "true", "1", "x", "✓", "✔", "da"):
         return True
     if s in ("nie", "no", "n", "false", "0", "", "-"):
         return False
@@ -170,52 +186,79 @@ def bool_label(b: bool) -> str:
     return "ÁNO" if b else "NIE"
 
 
+def _is_frozen_text(status_text: str) -> bool:
+    n = _norm(status_text)
+    return n in {_norm(w) for w in FROZEN_WORDS} or any(w in n for w in ("zamraz", "frozen", "❄"))
+
+
+# ── hlavička ─────────────────────────────────────────────────────────────────
+
+def _detect_layout(ws) -> tuple[dict[str, int], bool]:
+    """Mapa kľúč → index stĺpca podľa prvého riadku. Vráti (layout, hlavička_nájdená)."""
+    norm_to_key = {_norm(h): k for h, k in HEADER_KEY.items()}
+    layout: dict[str, int] = {}
+    for c in range(1, ws.max_column + 1):
+        key = norm_to_key.get(_norm(ws.cell(1, c).value))
+        if key and key not in layout:
+            layout[key] = c
+    found = "date" in layout
+    if not found:
+        return dict(DEFAULT_LAYOUT), False
+    return layout, True
+
+
 # ── čítanie ──────────────────────────────────────────────────────────────────
 
 def parse_workbook(data: bytes) -> Parsed:
     try:
         wb_v = load_workbook(io.BytesIO(data), data_only=True)
         wb_f = load_workbook(io.BytesIO(data), data_only=False)
-    except (zipfile.BadZipFile, KeyError, ValueError, OSError) as e:
-        raise TableCorrupt(f"xlsx sa nedá načítať: {e}") from e
     except Exception as e:  # noqa: BLE001 – openpyxl vie hodiť všeličo pri rozpísanom súbore
         raise TableCorrupt(f"xlsx sa nedá načítať: {e}") from e
     warnings: list[str] = []
     days: dict[date, RowVals] = {}
+    layout = dict(DEFAULT_LAYOUT)
+    max_row = 1
+    foreign = 0
     has_days = SHEET_DAYS in wb_v.sheetnames
     if has_days:
         ws_v, ws_f = wb_v[SHEET_DAYS], wb_f[SHEET_DAYS]
+        layout, _ = _detect_layout(ws_f)
+        max_row = ws_v.max_row
+        known_cols = set(layout.values())
         for r in range(2, ws_v.max_row + 1):
-            raw_date = ws_v.cell(r, COL["Dátum"]).value
-            if raw_date is None or str(raw_date).strip() == "":
-                continue
+            cells = [ws_v.cell(r, c).value for c in range(1, ws_v.max_column + 1)]
+            if all(v is None or str(v).strip() == "" for v in cells):
+                continue                                   # prázdny riadok
+            raw_date = ws_v.cell(r, layout["date"]).value
             d = cell_date(raw_date)
             if d is None:
-                warnings.append(f"riadok {r}: nerozumiem dátumu {raw_date!r} – preskakujem")
+                warnings.append(f"riadok {r}: nerozumiem dátumu {raw_date!r} – nechávam ho tak")
+                foreign += 1
                 continue
             if d in days:
-                warnings.append(f"riadok {r}: dátum {d} je v tabuľke dvakrát – beriem prvý")
+                warnings.append(f"riadok {r}: dátum {d} je v tabuľke dvakrát – beriem prvý (riadok {days[d].row})")
+                foreign += 1
                 continue
             formulas = set()
             vals = {}
-            for name in ("goal", "morning", "evening"):
-                col = {"goal": COL["Cieľ"], "morning": COL["Ráno"], "evening": COL["Večer"]}[name]
-                fv = ws_f.cell(r, col).value
+            for name in USER_COLS:
+                c = layout.get(name)
+                if c is None:
+                    vals[name] = None
+                    continue
+                fv = ws_f.cell(r, c).value
                 if isinstance(fv, str) and fv.startswith("="):
                     formulas.add(name)
-                vals[name] = cell_int(ws_v.cell(r, col).value)
-            status_text = str(ws_v.cell(r, COL["Stav"]).value or "").strip()
-            frozen_user = _norm(status_text) in FROZEN_WORDS or any(
-                w in _norm(status_text) for w in ("zamraz", "frozen", "❄"))
-            note = ws_v.cell(r, COL["Poznámka"]).value
-            extra = {}
-            for c in range(len(DAY_HEADERS) + 1, ws_v.max_column + 1):
-                v = ws_f.cell(r, c).value
-                if v is not None:
-                    extra[c] = v
+                vals[name] = cell_int(ws_v.cell(r, c).value)
+            status_text = str(ws_v.cell(r, layout["status"]).value or "").strip() if "status" in layout else ""
+            total_text = str(ws_v.cell(r, layout["total"]).value or "").strip() if "total" in layout else ""
+            note = ws_v.cell(r, layout["note"]).value if "note" in layout else None
+            extra = {c: ws_f.cell(r, c).value for c in range(1, ws_v.max_column + 1)
+                     if c not in known_cols and ws_f.cell(r, c).value is not None}
             days[d] = RowVals(d, vals["goal"], vals["morning"], vals["evening"],
-                              "" if note is None else str(note), status_text, frozen_user,
-                              formulas, extra)
+                              "" if note is None else str(note), status_text, _is_frozen_text(status_text),
+                              formulas, extra, r, total_text)
     settings: dict[str, object] = {}
     has_settings = SHEET_SETTINGS in wb_v.sheetnames
     if has_settings:
@@ -234,12 +277,7 @@ def parse_workbook(data: bytes) -> Parsed:
                     warnings.append(f"Nastavenia „{label}“: nerozumiem hodnote {v!r}")
                 continue
             settings[key] = parsed
-    return Parsed(days, settings, warnings, has_days, has_settings)
-
-
-def _norm(s: str) -> str:
-    import unicodedata
-    return "".join(c for c in unicodedata.normalize("NFD", s.lower()) if unicodedata.category(c) != "Mn")
+    return Parsed(days, settings, warnings, has_days, has_settings, layout, max_row, foreign)
 
 
 def _parse_setting(key: str, v):
@@ -266,43 +304,61 @@ class MergeResult:
     to_table: bool                   # treba tabuľku zapísať
     changed_days: list[date]
     changed_settings: list[str]
+    deleted_days: list[date] = field(default_factory=list)   # používateľ zmazal riadok → zmazať aj u bota
 
 
 def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_settings: Settings,
-          settings_synced: dict[str, str | None], today: date) -> MergeResult:
+          settings_synced: dict[str, str | None], today: date, default_goal: int = 10) -> MergeResult:
     """3-cestný merge: (tabuľka, bot, posledná zosynchronizovaná snímka).
 
     Pre každé pole: zmena v tabuľke voči snímke → vyhráva tabuľka; inak zmena bota → do tabuľky.
-    Riadky navyše v tabuľke sa importujú, riadky navyše u bota sa do tabuľky dopíšu.
+    Riadky navyše v tabuľke sa importujú; riadky, ktoré bot pozná ako zosynchronizované a v
+    tabuľke už nie sú, používateľ zmazal (okrem dnešného a okrem prázdnej tabuľky).
     """
     from_table: list[str] = []
     changed_days: list[date] = []
+    deleted: list[date] = []
     to_table = False
     result: dict[date, Day] = {}
     trows = parsed.days if parsed else {}
     bot_by_date = {d.date: (d, s) for d, s in bot_days}
+    table_has_rows = bool(trows)
+    all_dates = sorted(set(trows) | set(bot_by_date))
 
-    for d in sorted(set(trows) | set(bot_by_date)):
+    def prev_goal(d: date) -> int:
+        for x in reversed(all_dates):
+            if x < d:
+                src = result.get(x) or (bot_by_date.get(x) or (None,))[0]
+                if src is not None and src.goal > 0:
+                    return src.goal
+                tv = trows.get(x)
+                if tv is not None and tv.goal:
+                    return tv.goal
+        return default_goal
+
+    for d in all_dates:
         t = trows.get(d)
         bot, synced = bot_by_date.get(d, (None, None))
         if t is None and bot is not None:
+            if synced is not None and d != today and table_has_rows and parsed is not None and parsed.has_days_sheet:
+                deleted.append(d)              # bol v tabuľke a už nie je → používateľ ho zmazal
+                from_table.append(f"{d.day}.{d.month}.: riadok zmazaný (tabuľka)")
+                continue
             result[d] = bot
-            to_table = True          # v tabuľke chýba → dopíšeme
+            to_table = True                    # v tabuľke chýba → dopíšeme
             continue
         if bot is None and t is not None:
-            # nový riadok od používateľa
-            day = Day(d, t.goal if t.goal is not None else 0, t.morning or 0, t.evening or 0,
-                      t.frozen_by_user, t.note)
+            goal = t.goal if t.goal else prev_goal(d)     # bez cieľa → posledný známy cieľ, nie 0
+            day = Day(d, goal, t.morning or 0, t.evening or 0, t.frozen_by_user, t.note)
             result[d] = day
             from_table.append(f"{d.day}.{d.month}.: nový riadok {day.morning}+{day.evening}/{day.goal}")
             changed_days.append(d)
-            if t.goal is None:
-                to_table = True
+            to_table = True                    # dopočítané stĺpce (Spolu/Stav/Streak) treba zapísať
             continue
         assert t is not None and bot is not None
         new = bot
         row_to_table = False
-        for name in ("goal", "morning", "evening"):
+        for name in USER_COLS:
             tv = getattr(t, name)
             bv = getattr(bot, name)
             sv = getattr(synced, name) if synced else None
@@ -314,7 +370,7 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
                 # bunka so vzorcom patrí používateľovi – berieme jej hodnotu, nikdy ju neprepisujeme
                 if tv is not None and tv != bv:
                     new = new.copy(**{name: tv})
-                    from_table.append(f"{d.day}.{d.month}.: {name} = {tv} (vzorec)")
+                    from_table.append(f"{d.day}.{d.month}.: {_sk(name)} = {tv} (vzorec)")
                 continue
             if synced is None or tv_eff != (sv if sv is not None else 0):
                 if tv_eff != bv:
@@ -334,15 +390,12 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
         # zamrazený deň zo stĺpca Stav
         if t.frozen_by_user and not bot.frozen:
             if synced is not None and synced.frozen:
-                # „zamrazený“ v tabuľke je náš vlastný zápis z minula a bot medzitým deň
-                # odmrazil (/odmraz) → vyhráva bot, tabuľka sa prepíše
-                row_to_table = True
+                row_to_table = True          # náš starý zápis, bot medzitým odmrazil → vyhráva bot
             else:
                 new = new.copy(frozen=True)
                 from_table.append(f"{d.day}.{d.month}.: zamrazený (tabuľka)")
         elif not t.frozen_by_user and bot.frozen and synced is not None and synced.frozen \
                 and t.status_text and not new.done:
-            # používateľ „zamrazený“ zo Stavu zmazal/prepísal → odmrazený deň
             new = new.copy(frozen=False)
             from_table.append(f"{d.day}.{d.month}.: odmrazený (tabuľka)")
             row_to_table = True
@@ -350,8 +403,8 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
             row_to_table = True
         if new != bot:
             changed_days.append(d)
+            row_to_table = True              # používateľ menil hodnoty → prepočítať Spolu/Stav/Streak
         result[d] = new
-        # Spolu/Stav/Streak sa prepočítajú vždy – ale zapisujeme len keď treba
         if row_to_table or _computed_stale(t, new, today):
             to_table = True
 
@@ -377,7 +430,7 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
     if parsed is None or not parsed.has_days_sheet or not parsed.has_settings_sheet:
         to_table = True
     return MergeResult(sorted(result.values(), key=lambda x: x.date), settings, from_table,
-                       to_table, changed_days, changed_settings)
+                       to_table, changed_days, changed_settings, deleted)
 
 
 def _sk(name: str) -> str:
@@ -396,7 +449,9 @@ def _from_snapshot(key: str, s: str):
 
 
 def _computed_stale(t: RowVals, day: Day, today: date) -> bool:
-    return t.status_text.strip() != STATUS_LABEL[day.status(today)]
+    if t.status_text.strip() != STATUS_LABEL[day.status(today)]:
+        return True
+    return cell_int(t.total_text) != day.total
 
 
 # ── zápis ────────────────────────────────────────────────────────────────────
@@ -406,10 +461,21 @@ BOT_FILL = PatternFill("solid", fgColor="F2F2F2")
 STATUS_FILL = {DONE: "E2F0D9", FAILED: "FBE5D6", FROZEN: "DEEBF7", OPEN: "FFF2CC"}
 
 
+def _set_text(cell, value) -> None:
+    """Text do bunky tak, aby ho Excel nebral ako vzorec (poznámka „=fajn“)."""
+    if value is None or value == "":
+        cell.value = None
+        return
+    cell.value = str(value)
+    if str(value).startswith("="):
+        cell.data_type = "s"
+
+
 def render_workbook(existing: bytes | None, days: list[Day], settings: Settings,
-                    streaks: dict[date, int], today: date,
+                    streaks: dict[date, int], today: date, parsed: Parsed | None = None,
                     extras: dict[date, dict[int, object]] | None = None) -> bytes:
-    """Zapíše dni + nastavenia. `existing` sa upraví na mieste (cudzie hárky ostanú)."""
+    """Zapíše dni + nastavenia. `existing` sa upraví NA MIESTE podľa `parsed` (rozloženie
+    stĺpcov, riadky dní); cudzie riadky/stĺpce/komentáre/vzorce ostávajú."""
     wb = None
     if existing:
         try:
@@ -419,35 +485,60 @@ def render_workbook(existing: bytes | None, days: list[Day], settings: Settings,
     if wb is None:
         wb = Workbook()
         wb.remove(wb.active)
-    ws = wb[SHEET_DAYS] if SHEET_DAYS in wb.sheetnames else wb.create_sheet(SHEET_DAYS, 0)
-    # hlavička
-    for i, h in enumerate(DAY_HEADERS, 1):
-        c = ws.cell(1, i, h)
-        c.font = Font(bold=True)
-        c.fill = HEADER_FILL
-        c.alignment = Alignment(horizontal="center")
-    # vyčisti staré riadky (len naše stĺpce + extra stĺpce si prenesieme)
-    max_col = max(ws.max_column, len(DAY_HEADERS))
-    if ws.max_row >= 2:
-        ws.delete_rows(2, ws.max_row - 1)
-    extras = extras or {}
-    for r, day in enumerate(sorted(days, key=lambda x: x.date), start=2):
+        parsed = None
+    fresh = SHEET_DAYS not in wb.sheetnames
+    ws = wb[SHEET_DAYS] if not fresh else wb.create_sheet(SHEET_DAYS, 0)
+    layout = dict(parsed.layout) if (parsed is not None and parsed.has_days_sheet) else dict(DEFAULT_LAYOUT)
+    # chýbajúce známe stĺpce doplň na koniec (napr. používateľ zmazal „Streak“)
+    if not fresh:
+        _, found = _detect_layout(ws)
+        if not found:
+            layout = dict(DEFAULT_LAYOUT)
+        next_col = max([ws.max_column] + list(layout.values())) + 1
+        for key in KEYS:
+            if key not in layout:
+                layout[key] = next_col
+                next_col += 1
+    key_to_header = {k: h for h, k in HEADER_KEY.items()}
+    for key, c in layout.items():
+        cell = ws.cell(1, c)
+        if cell.value is None or _norm(cell.value) != _norm(key_to_header[key]):
+            cell.value = key_to_header[key]
+        cell.font = Font(bold=True)
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal="center")
+
+    rows_by_date = {d: rv.row for d, rv in (parsed.days.items() if parsed else [])}
+    formula_by_date = {d: rv.formula_cells for d, rv in (parsed.days.items() if parsed else [])}
+    next_row = max([1, ws.max_row] + list(rows_by_date.values())) + 1
+    if fresh or parsed is None:
+        next_row = 2
+    for day in sorted(days, key=lambda x: x.date):
+        r = rows_by_date.get(day.date)
+        if r is None:
+            r = next_row
+            next_row += 1
+            ws.cell(r, layout["date"], day.date).number_format = "DD.MM.YYYY"
+        formulas = formula_by_date.get(day.date, set())
         st = day.status(today)
-        ws.cell(r, COL["Dátum"], day.date).number_format = "DD.MM.YYYY"
-        ws.cell(r, COL["Cieľ"], day.goal)
-        ws.cell(r, COL["Ráno"], day.morning)
-        ws.cell(r, COL["Večer"], day.evening)
-        ws.cell(r, COL["Spolu"], day.total).fill = BOT_FILL
-        c = ws.cell(r, COL["Stav"], STATUS_LABEL[st])
+        for key, value in (("goal", day.goal), ("morning", day.morning), ("evening", day.evening)):
+            if key in formulas:
+                continue                                   # vzorec používateľa nechávame
+            cell = ws.cell(r, layout[key])
+            if cell.value != value:
+                cell.value = value
+        ws.cell(r, layout["total"], day.total).fill = BOT_FILL
+        c = ws.cell(r, layout["status"], STATUS_LABEL[st])
         c.fill = PatternFill("solid", fgColor=STATUS_FILL[st])
-        ws.cell(r, COL["Streak"], streaks.get(day.date, 0)).fill = BOT_FILL
-        ws.cell(r, COL["Poznámka"], day.note or None)
-        for col, v in extras.get(day.date, {}).items():
+        ws.cell(r, layout["streak"], streaks.get(day.date, 0)).fill = BOT_FILL
+        _set_text(ws.cell(r, layout["note"]), day.note or None)
+        for col, v in (extras or {}).get(day.date, {}).items():
             ws.cell(r, col, v)
-    widths = {"A": 12, "B": 7, "C": 7, "D": 7, "E": 7, "F": 14, "G": 8, "H": 40}
-    for col, w in widths.items():
-        ws.column_dimensions[col].width = w
-    ws.freeze_panes = "A2"
+    if fresh:
+        widths = {"date": 12, "goal": 7, "morning": 7, "evening": 7, "total": 7, "status": 14, "streak": 8, "note": 40}
+        for key, w in widths.items():
+            ws.column_dimensions[ws.cell(1, layout[key]).column_letter].width = w
+        ws.freeze_panes = "A2"
 
     # nastavenia
     wss = wb[SHEET_SETTINGS] if SHEET_SETTINGS in wb.sheetnames else wb.create_sheet(SHEET_SETTINGS)
@@ -455,13 +546,13 @@ def render_workbook(existing: bytes | None, days: list[Day], settings: Settings,
         c = wss.cell(1, i, h)
         c.font = Font(bold=True)
         c.fill = HEADER_FILL
-    # existujúce riadky podľa popisku (zachovaj poradie používateľa), chýbajúce doplň
     label_rows: dict[str, int] = {}
     for r in range(2, wss.max_row + 1):
         lab = wss.cell(r, 1).value
         if lab is not None:
             label_rows[str(lab).strip()] = r
     next_row = max([1] + list(label_rows.values())) + 1
+    wss.data_validations.dataValidation = []           # žiadne hromadenie validácií
     dv_bool = DataValidation(type="list", formula1='"ÁNO,NIE"', allow_blank=True)
     wss.add_data_validation(dv_bool)
     for key, label, desc in SETTINGS_ROWS:
@@ -477,7 +568,11 @@ def render_workbook(existing: bytes | None, days: list[Day], settings: Settings,
         elif key in TIME_KEYS:
             wss.cell(r, 2, str(v))
         else:
-            wss.cell(r, 2, v)
+            cell = wss.cell(r, 2)
+            if isinstance(v, str):
+                _set_text(cell, v)
+            else:
+                cell.value = v
         wss.cell(r, 3, desc)
     wss.column_dimensions["A"].width = 30
     wss.column_dimensions["B"].width = 26

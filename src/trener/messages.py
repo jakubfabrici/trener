@@ -136,11 +136,13 @@ HELP = ("🤖 Tréner klikov – príkazy\n"
         "Splnenú fázu odčiarknem v Pripomienkach; keď odčiarkneš ty, beriem ju ako splnenú.")
 
 
-def table_info(url: str, day: Day, ok: bool, at: str | None, warnings: list[str]) -> str:
+def table_info(url: str, day: Day, ok: bool, at: str | None, warnings: list[str], busy: bool = False) -> str:
     lines = [f"📋 Tabuľka: {url}",
              f"Dnes {d(day.date)}: cieľ {day.goal}, ráno {day.morning}, večer {day.evening}, "
              f"spolu {day.total}",
              ("✅ posledný sync " + at) if ok and at else "⚠️ tabuľka je momentálne nedostupná – bežím z lokálnej kópie"]
+    if busy:
+        lines.append("✏️ Súbor má teraz otvorený iný program (Excel) – čítam ho, zapíšem, keď ho zavrieš.")
     if warnings:
         lines.append("⚠️ " + " | ".join(warnings[:3]))
     return "\n".join(lines)

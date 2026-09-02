@@ -307,3 +307,22 @@ def test_reminder_backend_down_does_not_block_nags(h):
     h.todos.list = original
     h.tick_at(at(7, 2))
     assert h.t.rem_ok is True
+
+
+def test_excel_holding_file_is_not_an_outage(h):
+    from trener.smb_io import Busy
+    h.tick_at(at(6, 0))
+    real_write = h.backend.write
+
+    def busy(data, expected):
+        raise Busy("excel")
+    h.backend.write = busy
+    h.text(at(7, 5), "2")
+    for m in range(6, 40, 1):
+        h.tick_at(at(7, m))
+    assert not any("nedostupná" in x for x in h.take())
+    assert h.t.table_ok and h.t.table_busy and h.t.table_dirty
+    assert "Excel" in asyncio.run(h.t.table_info())
+    h.backend.write = real_write
+    h.tick_at(at(7, 45))
+    assert not h.t.table_busy and h.table_rows()[D][1] == 2
