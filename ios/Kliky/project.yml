@@ -28,8 +28,8 @@ targets:
     platform: iOS
     sources:
       - path: Sources
-    info:
-      path: Resources/Info.plist
+    # Zámerne bez `info:` — ten by Resources/Info.plist prepísal vygenerovaným
+    # a vypadli by z neho povolenia na budíky a pripomienky. Stačí INFOPLIST_FILE.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: xyz.fabrici.kliky

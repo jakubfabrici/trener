@@ -35,8 +35,11 @@ xcodebuild build \
 
 app="$vystup/dd/Build/Products/Release-iphoneos/Kliky.app"
 [ -d "$app" ] || { echo "Build neprodukoval Kliky.app" >&2; exit 1; }
-# Poistka proti tichému „len resources" buildu.
-/usr/bin/plutil -extract NSAlarmKitUsageDescription raw "$app/Info.plist" >/dev/null
+# Poistka: bez týchto kľúčov appka ticho nedostane povolenia a nič nezazvoní.
+for kluc in NSAlarmKitUsageDescription NSRemindersFullAccessUsageDescription; do
+  /usr/bin/plutil -extract "$kluc" raw "$app/Info.plist" >/dev/null \
+    || { echo "V Info.plist chýba $kluc" >&2; exit 1; }
+done
 [ -f "$app/Kliky" ] || { echo "V Kliky.app chýba binárka" >&2; exit 1; }
 
 mkdir -p "$vystup/Payload"
