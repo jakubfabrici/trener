@@ -330,8 +330,13 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
             row_to_table = True
         # zamrazený deň zo stĺpca Stav
         if t.frozen_by_user and not bot.frozen:
-            new = new.copy(frozen=True)
-            from_table.append(f"{d.day}.{d.month}.: zamrazený (tabuľka)")
+            if synced is not None and synced.frozen:
+                # „zamrazený“ v tabuľke je náš vlastný zápis z minula a bot medzitým deň
+                # odmrazil (/odmraz) → vyhráva bot, tabuľka sa prepíše
+                row_to_table = True
+            else:
+                new = new.copy(frozen=True)
+                from_table.append(f"{d.day}.{d.month}.: zamrazený (tabuľka)")
         elif not t.frozen_by_user and bot.frozen and synced is not None and synced.frozen \
                 and t.status_text and not new.done:
             # používateľ „zamrazený“ zo Stavu zmazal/prepísal → odmrazený deň

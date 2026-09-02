@@ -75,8 +75,9 @@ class ReminderSync:
         self.tz = tz
 
     # ── hlavný sync ─────────────────────────────────────────────────────────
-    def sync(self, today: Day, settings: Settings) -> SyncOutcome:
+    def sync(self, today: Day, settings: Settings, allow_create: bool = True) -> SyncOutcome:
         out = SyncOutcome(settings=settings.copy())
+        self._allow_create = allow_create
         try:
             items = self.todos.list()
         except (CalDavError, OSError) as e:
@@ -169,7 +170,7 @@ class ReminderSync:
         desired_due = due_for(today.date, settings.session_time(session), self.tz)
 
         if item is None:
-            if frozen or st.user_deleted or session_done:
+            if frozen or st.user_deleted or session_done or not getattr(self, "_allow_create", True):
                 self.store.save_reminder(st)
                 return
             uid = f"kliky-{today.date.isoformat()}-{session}-{uuid.uuid4().hex[:6]}"

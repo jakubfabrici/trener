@@ -162,3 +162,19 @@ def test_rows_sorted_and_status_recomputed():
     ws = wb[SHEET_DAYS]
     assert [ws.cell(r, 1).value.day for r in (2, 3, 4)] == [31, 1, 2]
     assert ws.cell(2, 6).value.startswith("❌") and ws.cell(3, 6).value.startswith("✅")
+
+
+def test_unfreeze_by_bot_is_not_undone_by_own_status_text():
+    """/odmraz: bot deň odmrazí, v tabuľke ešte svieti náš „❄️ zamrazený“ → nesmie sa znovu zamraziť."""
+    frozen_day = Day(D, 12, 0, 0, frozen=True)
+    p = parse_workbook(render([frozen_day]))          # Stav = ❄️ zamrazený (náš zápis)
+    assert p.days[D].frozen_by_user
+    bot_now = Day(D, 12, 0, 0, frozen=False)          # bot odmrazil
+    m = merge(p, [(bot_now, frozen_day)], Settings(), {}, D)
+    assert m.days[0].frozen is False and m.to_table
+    # ale ak používateľ napísal „zamrazený“ do dňa, ktorý sme mali ako nezamrazený → prevezmeme
+    open_day = Day(D, 12, 0, 0)
+    p2 = parse_workbook(render([open_day]))
+    p2.days[D].status_text = "zamrazený"; p2.days[D].frozen_by_user = True
+    m2 = merge(p2, [(open_day, open_day)], Settings(), {}, D)
+    assert m2.days[0].frozen is True

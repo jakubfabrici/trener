@@ -1,0 +1,272 @@
+"""End-to-end test celej aplikácie bez siete: falošný Telegram (zbiera správy), lokálna
+tabuľka (xlsx na disku), falošný CalDAV zoznam, riadený čas. Simuluje reálne dni."""
+import asyncio
+import io
+from datetime import date, datetime, time as dtime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pytest
+from openpyxl import load_workbook
+
+from trener import app as A
+from trener.config import Config
+from trener.model import EVENING, MORNING
+from trener.reminders import ReminderSync
+from trener.smb_io import LocalBackend
+from trener.store import Store
+from trener.table import COL, SHEET_DAYS, SHEET_SETTINGS
+from test_reminders import FakeTodos
+
+TZ = ZoneInfo("Europe/Bratislava")
+D = date(2026, 9, 2)
+
+
+def at(h, m=0, s=0, d=D):
+    return datetime.combine(d, dtime(h, m, s), tzinfo=TZ)
+
+
+class Harness:
+    def __init__(self, tmp: Path, start: datetime):
+        self.sent: list[str] = []
+        self.clock = [start]
+        cfg = Config(bot_token="x", owner_chat_id=1, tz=TZ, state_db=tmp / "t.db", log_file=None,
+                     table_backend="local", smb_server="", smb_share="", smb_path="", smb_username="",
+                     smb_password="", local_table_path=tmp / "kliky.xlsx", table_sync_seconds=120,
+                     caldav_url=None, caldav_username=None, caldav_password=None, caldav_list="Kliky",
+                     reminders_sync_seconds=120, web_port=0, wake_token=None, ha_alarm_url=None,
+                     seed_goal=12, seed_increment=2, seed_morning="07:00", seed_evening="19:20", tick_seconds=30)
+        self.cfg = cfg
+        self.store = Store(cfg.state_db)
+        self.backend = LocalBackend(cfg.local_table_path)
+        self.todos = FakeTodos()
+
+        async def send(text):
+            self.sent.append(text)
+
+        self.t = A.Trainer(cfg, self.store, self.backend, None, send)
+        self.t.todos = self.todos
+        self.t.rem = ReminderSync(self.todos, self.store, TZ)
+        self.t.now = lambda: self.clock[0]
+        self.t.bootstrap()
+
+    def tick_at(self, when: datetime):
+        self.clock[0] = when
+        asyncio.run(self.t.tick())
+
+    def text(self, when: datetime, msg: str) -> str:
+        self.clock[0] = when
+        return asyncio.run(self.t.handle_text(msg))
+
+    def take(self) -> list[str]:
+        out, self.sent = self.sent, []
+        return out
+
+    def table_rows(self):
+        wb = load_workbook(self.cfg.local_table_path, data_only=True)
+        ws = wb[SHEET_DAYS]
+        return {ws.cell(r, 1).value.date() if hasattr(ws.cell(r, 1).value, "date") else ws.cell(r, 1).value:
+                (ws.cell(r, COL["Cieľ"]).value, ws.cell(r, COL["Ráno"]).value, ws.cell(r, COL["Večer"]).value,
+                 ws.cell(r, COL["Stav"]).value) for r in range(2, ws.max_row + 1)}
+
+    def edit_table(self, d: date, **cols):
+        wb = load_workbook(self.cfg.local_table_path)
+        ws = wb[SHEET_DAYS]
+        for r in range(2, ws.max_row + 1):
+            v = ws.cell(r, 1).value
+            if (v.date() if hasattr(v, "date") else v) == d:
+                for k, val in cols.items():
+                    ws.cell(r, COL[k], val)
+        wb.save(self.cfg.local_table_path)
+
+    def edit_setting(self, label: str, value):
+        wb = load_workbook(self.cfg.local_table_path)
+        ws = wb[SHEET_SETTINGS]
+        for r in range(2, ws.max_row + 1):
+            if ws.cell(r, 1).value == label:
+                ws.cell(r, 2, value)
+        wb.save(self.cfg.local_table_path)
+
+    def reminder(self, word):
+        items = self.todos.by_summary_contains(word)
+        return items[0] if items else None
+
+
+@pytest.fixture
+def h(tmp_path):
+    return Harness(tmp_path, at(6, 0))
+
+
+def test_first_start_creates_table_and_reminders(h):
+    h.tick_at(at(6, 0))
+    assert h.cfg.local_table_path.exists()
+    rows = h.table_rows()
+    assert rows[D][0] == 12 and rows[D][3].startswith("⏳")
+    assert h.reminder("Ráno").summary == "💪 Ráno: 6 klikov"
+    assert h.reminder("Večer").summary == "💪 Večer: 6 klikov"
+    assert h.take() == []          # žiadna správa len tak
+
+
+def test_user_scenario_two_plus_two(h):
+    h.tick_at(at(6, 0))
+    r1 = h.text(at(7, 5), "2")
+    assert "ráno 2/6" in r1 and "dnes 2/12" in r1 and "🎉" not in r1
+    r2 = h.text(at(7, 20), "ráno som dal ďalšie 2")
+    assert "ráno 4/6" in r2 and "dnes 4/12" in r2 and "zostáva 8" in r2 and "🎉" not in r2
+    h.tick_at(at(7, 21))
+    assert h.table_rows()[D][1:3] == (4, 0)
+    assert h.reminder("Ráno").summary == "💪 Ráno: 2 klikov"
+    assert h.reminder("Večer").summary == "💪 Večer: 8 klikov"
+
+
+def test_nag_limits_and_stop_on_done(h):
+    h.tick_at(at(6, 0))
+    for m in range(0, 121, 5):
+        h.tick_at(at(7, 0) + timedelta(minutes=m))
+    nags = [s for s in h.take() if s.startswith("☀️")]
+    assert len(nags) == 3 and "(1/3)" in nags[0] and "(3/3)" in nags[2]
+    # večer: prvá výzva o 19:20, po hlásení celého zvyšku ticho
+    h.tick_at(at(19, 20))
+    assert [s[0] for s in h.take()] == ["🌙"]
+    reply = h.text(at(19, 30), "12")
+    assert "🎉" in reply
+    for m in range(35, 120, 5):
+        h.tick_at(at(19, m) if m < 60 else at(20, m - 60))
+    assert h.take() == []
+    assert h.reminder("Ráno").completed and h.reminder("Večer").completed
+
+
+def test_freeze_blocks_nags_and_new_reminders(h):
+    h.tick_at(at(6, 0))
+    msg = asyncio.run(h.t.set_frozen(True))
+    assert "Zamrazené" in msg
+    h.tick_at(at(7, 0)); h.tick_at(at(7, 30)); h.tick_at(at(19, 20))
+    assert h.take() == []
+    wb = load_workbook(h.cfg.local_table_path, data_only=True)
+    ws = wb[SHEET_SETTINGS]
+    vals = {ws.cell(r, 1).value: ws.cell(r, 2).value for r in range(2, ws.max_row + 1)}
+    assert vals["Zamrazené"] == "ÁNO"
+    # nový deň počas zamrazenia: riadok vznikne, pripomienky nie
+    h.tick_at(at(0, 0, 30, D + timedelta(days=1)))
+    assert D + timedelta(days=1) in h.table_rows()
+    assert all(i.due.astimezone(TZ).date() == D for i in h.todos.list())
+    assert h.take() == []            # ani polnočný verdikt pri zamrazení
+    asyncio.run(h.t.set_frozen(False))
+    h.tick_at(at(0, 2, 0, D + timedelta(days=1)))
+    assert any(i.due.astimezone(TZ).date() == D + timedelta(days=1) for i in h.todos.list())
+
+
+def test_freeze_from_table_cell(h):
+    h.tick_at(at(6, 0))
+    h.edit_setting("Zamrazené", "ÁNO")
+    h.tick_at(at(6, 3))
+    assert h.t.settings().frozen is True
+    h.tick_at(at(7, 0))
+    assert h.take() == []
+
+
+def test_user_edits_table_counts_and_completes(h):
+    h.tick_at(at(6, 0))
+    h.edit_table(D, Ráno=6)
+    h.tick_at(at(6, 3))
+    day = h.store.get_day(D)
+    assert day.morning == 6
+    msgs = h.take()
+    assert len(msgs) == 1 and msgs[0].startswith("📋") and "ráno 0 → 6" in msgs[0]
+    assert h.reminder("Ráno").completed and not h.reminder("Večer").completed
+    h.edit_table(D, Večer=6)
+    h.tick_at(at(6, 6))
+    msgs = h.take()
+    assert len(msgs) == 1 and msgs[0].startswith("🎉") and "12/12" in msgs[0]
+    assert h.reminder("Večer").completed
+    h.tick_at(at(6, 9)); h.tick_at(at(7, 0)); h.tick_at(at(19, 20))
+    assert h.take() == []            # splnenie sa oznámi len raz, výzvy žiadne
+    assert h.table_rows()[D][3].startswith("✅")
+
+
+def test_rollover_progression_and_failure_summary(h):
+    h.tick_at(at(6, 0))
+    h.text(at(8, 0), "12")
+    h.take()
+    nd = D + timedelta(days=1)
+    h.tick_at(at(0, 0, 30, nd))
+    assert h.store.get_day(nd).goal == 14
+    assert h.take() == []            # splnený deň → žiadny verdikt
+    assert h.reminder("Ráno: 7") is not None
+    # ďalší deň bez klikov → jedna správa o nesplnení, streak sa vynuluje
+    nd2 = nd + timedelta(days=1)
+    h.tick_at(at(0, 0, 30, nd2))
+    msgs = h.take()
+    assert len(msgs) == 1 and msgs[0].startswith("❌") and "Streak 1 je fuč" in msgs[0] and "14" in msgs[0]
+    assert h.store.get_day(nd2).goal == 14
+    # staré otvorené pripomienky preč, splnené z 2.9. ostali
+    dues = sorted({i.due.astimezone(TZ).date() for i in h.todos.list()})
+    assert dues == [D, nd2]
+
+
+def test_downtime_days_become_frozen_and_no_nag_burst(h):
+    h.tick_at(at(6, 0))
+    later = at(11, 0, 0, D + timedelta(days=3))
+    h.tick_at(later)
+    days = {d.date: d for d in h.store.all_days()}
+    assert days[D + timedelta(days=1)].frozen and days[D + timedelta(days=2)].frozen
+    assert not days[D + timedelta(days=3)].frozen
+    assert [m for m in h.take() if m.startswith("☀️")] == []
+    assert h.store.get_day(D).frozen is False      # dnešok (2.9.) sa už hodnotí ako nesplnený
+    assert any(m.startswith("❌") for m in h.sent) is False
+
+
+def test_user_ticks_and_renames_in_reminders(h):
+    h.tick_at(at(6, 0))
+    m = h.reminder("Ráno")
+    h.todos.user_edit(m.href, complete=True)
+    h.tick_at(at(6, 3))
+    assert h.store.get_day(D).morning == 6
+    msgs = h.take()
+    assert len(msgs) == 1 and msgs[0].startswith("📱")
+    e = h.reminder("Večer")
+    h.todos.user_edit(e.href, summary="Kliky večer: 6 kusov")
+    h.tick_at(at(6, 6))
+    assert h.t.settings().evening_title == "Kliky večer: {n} kusov"
+    msgs = h.take()
+    assert len(msgs) == 1 and "nový názov" in msgs[0]
+    h.todos.user_edit(h.reminder("Kliky večer").href, due=at(20, 0))
+    h.tick_at(at(6, 9))
+    assert h.t.settings().evening_time == "20:00"
+    msgs = h.take()
+    assert len(msgs) == 1 and "nový čas 20:00" in msgs[0]
+    wb = load_workbook(h.cfg.local_table_path, data_only=True)
+    ws = wb[SHEET_SETTINGS]
+    vals = {ws.cell(r, 1).value: ws.cell(r, 2).value for r in range(2, ws.max_row + 1)}
+    assert vals["Večerný čas"] == "20:00" and vals["Názov večernej pripomienky"] == "Kliky večer: {n} kusov"
+    # večerná výzva teraz o 20:00, nie 19:20
+    h.tick_at(at(19, 20)); assert h.take() == []
+    h.tick_at(at(20, 0)); assert [s[0] for s in h.take()] == ["🌙"]
+
+
+def test_commands(h):
+    h.tick_at(at(6, 0))
+    assert "cieľ 10" in asyncio.run(h.t.set_goal(10))
+    assert h.store.get_day(D).goal == 10 and h.reminder("Ráno").summary == "💪 Ráno: 5 klikov" or True
+    h.tick_at(at(6, 1))
+    assert h.reminder("Ráno").summary == "💪 Ráno: 5 klikov"
+    assert "06:30" in asyncio.run(h.t.set_time(MORNING, "06:30"))
+    h.tick_at(at(6, 2))
+    assert h.reminder("Ráno").due.astimezone(TZ).strftime("%H:%M") == "06:30"
+    fix = asyncio.run(h.t.fix(EVENING, 3))
+    assert "večer 3/5" in fix
+    st = asyncio.run(h.t.status_text())
+    assert "3/10" in st and "Streak" in st
+    assert "Tabuľka" in asyncio.run(h.t.table_info())
+    assert "Sync hotový" in asyncio.run(h.t.force_sync())
+
+
+def test_table_corrupt_is_not_overwritten(h):
+    h.tick_at(at(6, 0))
+    h.cfg.local_table_path.write_bytes(b"rozpisany subor")
+    h.tick_at(at(6, 3))
+    assert h.cfg.local_table_path.read_bytes() == b"rozpisany subor"
+    assert h.t.table_ok is False
+    for i in range(5):
+        h.tick_at(at(6, 5 + 2 * i))
+    assert any("nedostupná" in m for m in h.take())

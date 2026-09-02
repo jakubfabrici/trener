@@ -133,6 +133,9 @@ class Trainer:
                 await self._sync_table()
             if self.rem and (self.rem_dirty or self._due(self.last_rem_sync, self.cfg.reminders_sync_seconds)):
                 await self._sync_reminders()
+            if self.table_dirty:
+                # zmeny z Pripomienok (odškrtnutie, nový čas/názov) hneď do tabuľky
+                await self._sync_table()
             await self._check_completion("tabuľka/Pripomienky")
             await self._nags(now)
 
@@ -146,6 +149,11 @@ class Trainer:
         cur_d = date.fromisoformat(cur) if cur else today
         if cur_d >= today:
             return
+        # najprv dotiahni nevybavené zmeny STARÉHO dňa (hlásenie tesne pred polnocou musí
+        # odčiarknuť včerajšie pripomienky skôr, než sa ako „staré otvorené“ zmažú)
+        old_day = self.store.get_day(cur_d)
+        if self.rem and self.rem_dirty and old_day is not None:
+            await self._sync_reminders(day=old_day, allow_create=False)
         settings = self.settings()
         days = self.store.all_days()
         for nd in fill_missing_days(days, today, settings, self.cfg.seed_goal):
@@ -240,12 +248,12 @@ class Trainer:
             await self.send(f"⚠️ Tabuľka je nedostupná ({why[:120]}). Bežím ďalej z lokálnej kópie a skúšam znova.")
 
     # ── pripomienky ─────────────────────────────────────────────────────────
-    async def _sync_reminders(self) -> None:
+    async def _sync_reminders(self, day: Day | None = None, allow_create: bool = True) -> None:
         if not self.rem:
             return
-        today = self.today_day()
+        today = day if day is not None else self.today_day()
         settings = self.settings()
-        out = await asyncio.to_thread(self.rem.sync, today, settings)
+        out = await asyncio.to_thread(self.rem.sync, today, settings, allow_create)
         for n in out.notes:
             log.info("Pripomienky: %s", n)
         if out.errors:
