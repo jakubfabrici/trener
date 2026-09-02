@@ -22,6 +22,7 @@ from telegram.ext import Application, ApplicationBuilder
 from trener import config as C
 from trener import messages as M
 from trener.caldav_todo import TodoList
+from trener.calendar_sync import CalendarSync, EventCalendar
 from trener.engine import (WAKE_FLOOR, Snapshot, apply_reports, compute_streak, default_session, elapsed,
                            fill_missing_days, next_goal, plan, streak_after)
 from trener.model import EVENING, MORNING, Day, Report, Settings
@@ -38,13 +39,20 @@ log = logging.getLogger("trener")
 
 
 class Trainer:
-    def __init__(self, cfg: C.Config, store: Store, backend, todos: TodoList | None, send):
+    def __init__(self, cfg: C.Config, store: Store, backend, todos: TodoList | None, send,
+                 calendar: EventCalendar | None = None):
         self.cfg, self.store, self.backend, self.todos, self.send = cfg, store, backend, todos, send
         self.tz = cfg.tz
         self.rem = ReminderSync(todos, store, cfg.tz) if todos else None
         # iCloud Pripomienky cez iOS Skratku (bot do iCloudu zapisovať nevie – robí to telefón)
         self.bridge = ShortcutBridge(store, cfg.tz, cfg.reminders_list) \
             if cfg.reminders_mode == "shortcuts" else None
+        self.calendar = calendar
+        self.cal_sync = CalendarSync(calendar, store, cfg.tz, cfg.calendar_minutes) if calendar else None
+        self.cal_ok: bool | None = None if calendar else None
+        self.cal_dirty = True
+        self.last_cal_sync: datetime | None = None
+        self._cal_inflight = False
         self.inbox: queue.SimpleQueue = queue.SimpleQueue()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.last_shortcut_at: datetime | None = None
@@ -83,6 +91,7 @@ class Trainer:
         self.store.save_settings(s)
         self.table_dirty = True
         self.rem_dirty = True
+        self.cal_dirty = True
 
     def today_day(self) -> Day:
         t = self.now().date()
@@ -113,6 +122,8 @@ class Trainer:
         snap.update({"ok": True, "time": self.now().isoformat(), "started": self.started_at.isoformat(),
                      "table": {"ok": self.table_ok, "busy": self.table_busy, "last_sync": self.last_table_sync,
                                "url": self.cfg.table_url, "warnings": self.table_warnings[:5]},
+                     "calendar": {"mode": self.cfg.calendar_mode, "name": self.cfg.calendar_name,
+                                  "ok": self.cal_ok, "last_sync": self.last_cal_sync},
                      "reminders": {"mode": self.cfg.reminders_mode,
                                    "enabled": self.rem is not None or self.bridge is not None,
                                    "ok": self.rem_ok, "last_sync": self.last_rem_sync,
@@ -215,6 +226,8 @@ class Trainer:
                 await self._sync_table()
             if self.rem and (self.rem_dirty or self._due(self.last_rem_sync, self.cfg.reminders_sync_seconds)):
                 await self._sync_reminders()
+            if self.cal_sync and (self.cal_dirty or self._due(self.last_cal_sync, self.cfg.calendar_sync_seconds)):
+                await self._sync_calendar()
             if self.table_dirty and not self._table_failed_this_tick and self._table_wanted(now):
                 # zmeny z Pripomienok (odškrtnutie, nový čas/názov) hneď do tabuľky
                 await self._sync_table()
@@ -254,10 +267,13 @@ class Trainer:
         if yday and tday and yday.status(today) == "failed" and settings.summary_on_fail and not settings.frozen:
             before = streak_after(self.store.all_days(), yday.date - timedelta(days=1), today)
             await self.send(M.day_failed(yday, before, tday.goal))
+        if yday is not None:
+            await self._finalize_calendar(yday, today)
         self.store.set_meta("current_date", today.isoformat())
         self.woke_date = None
         self.table_dirty = True
         self.rem_dirty = True
+        self.cal_dirty = True
 
     # ── tabuľka ─────────────────────────────────────────────────────────────
     async def _guarded(self, flag: str, fn, *args, timeout: float):
@@ -428,6 +444,57 @@ class Trainer:
                                                next_goal(res.day, out.settings, self.cfg.seed_goal))
                                 .replace("✅", "📱", 1))
 
+    # ── budík v iCloud kalendári ────────────────────────────────────────────
+    async def _sync_calendar(self, day: Day | None = None, allow_create: bool = True) -> None:
+        if not self.cal_sync:
+            return
+        if self._cal_inflight:
+            log.warning("Kalendár: predchádzajúci sync ešte beží – preskakujem.")
+            return
+        target = day if day is not None else self.today_day()
+        try:
+            out = await self._guarded("_cal_inflight", self.cal_sync.sync, target, self.settings(),
+                                      allow_create, timeout=60)
+        except asyncio.TimeoutError:
+            log.warning("Kalendár: sync trvá pridlho (iCloud neodpovedá).")
+            self.cal_ok = False
+            return
+        except Exception as e:  # noqa: BLE001 – kalendár nikdy nesmie zhodiť tick
+            if self.cal_ok is not False:
+                log.warning("Kalendár: neočakávaná chyba: %s", e, exc_info=True)
+            self.cal_ok = False
+            return
+        for n in out.notes:
+            log.info("Kalendár: %s", n)
+        if out.errors:
+            if self.cal_ok is not False:
+                log.warning("Kalendár: %s", "; ".join(out.errors))
+            self.cal_ok = False
+        else:
+            if self.cal_ok is False:
+                log.info("Kalendár opäť funguje.")
+            self.cal_ok = True
+            self.last_cal_sync = self.now()
+            self.cal_dirty = False
+        if out.settings_changed:
+            self.store.save_settings(out.settings)
+            self.table_dirty = True
+            self.rem_dirty = True
+            learned = [n for n in out.notes if "podľa tvojej úpravy" in n]
+            if learned and not out.settings.frozen:
+                await self.send("📅 " + " ".join(learned) + " Platí pre všetky ďalšie dni.")
+
+    async def _finalize_calendar(self, day: Day, today: date) -> None:
+        if not self.cal_sync:
+            return
+        try:
+            notes = await asyncio.wait_for(
+                asyncio.to_thread(self.cal_sync.finalize, day, today), timeout=60)
+            for n in notes:
+                log.info("Kalendár: %s", n)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Kalendár: uzavretie dňa zlyhalo: %s", e)
+
     # ── splnenie a výzvy ────────────────────────────────────────────────────
     async def _check_completion(self, source: str) -> None:
         today = self.now().date()
@@ -475,6 +542,7 @@ class Trainer:
         self.store.save_day(res.day)
         self.table_dirty = True
         self.rem_dirty = True
+        self.cal_dirty = True
         self.kick()
         return res
 
@@ -633,6 +701,8 @@ class Trainer:
             await self._sync_table()
             if self.rem:
                 await self._sync_reminders()
+            if self.cal_sync:
+                await self._sync_calendar()
             await self._check_completion("tabuľka/Pripomienky")
         async with self.lock:
             self._refresh_shortcut_snapshot()
@@ -643,6 +713,8 @@ class Trainer:
             rem = "✅" if self.rem_ok else "⚠️ nedostupné"
         else:
             rem = "vypnuté"
+        if self.cal_sync:
+            rem += "; 📅 kalendár " + ("✅" if self.cal_ok else "⚠️ nedostupný")
         return M.SYNCED.format(table="✅" if self.table_ok else "⚠️ nedostupná", rem=rem)
 
     async def status_text(self) -> str:
@@ -652,7 +724,8 @@ class Trainer:
             streak = compute_streak(self.store.all_days(), day.date)
             at = self.last_table_sync.strftime("%H:%M") if self.last_table_sync else None
             return M.status(day, s, streak, self.table_ok, at, self.rem_ok if self.rem else None,
-                            next_goal(day, s, self.cfg.seed_goal))
+                            next_goal(day, s, self.cfg.seed_goal),
+                            self.cal_ok if self.cal_sync else None, self.cfg.calendar_name)
 
     async def stats_text(self) -> str:
         async with self.lock:
@@ -704,6 +777,15 @@ def main() -> None:
                  cfg.reminders_list)
     else:
         log.info("Pripomienky vypnuté (REMINDERS_MODE=off).")
+    calendar = None
+    if cfg.calendar_mode == "icloud":
+        if cfg.calendar_user and cfg.calendar_password:
+            calendar = EventCalendar(cfg.calendar_url, cfg.calendar_user, cfg.calendar_password,
+                                     cfg.calendar_name, color=cfg.calendar_color)
+            log.info("Budík: iCloud kalendár '%s' (%s).", cfg.calendar_name, cfg.calendar_url)
+        else:
+            log.warning("CALENDAR_MODE=icloud, ale ICLOUD_USERNAME/ICLOUD_APP_PASSWORD chýbajú – "
+                        "kalendárový budík vypnutý.")
     log.info("Tabuľka: %s", backend.describe())
 
     application: Application = (ApplicationBuilder().token(cfg.bot_token)
@@ -711,7 +793,8 @@ def main() -> None:
                                 .post_init(post_init).post_stop(post_stop)
                                 .post_shutdown(post_shutdown).build())
 
-    trainer = Trainer(cfg, store, backend, todos, make_sender(application.bot, cfg.owner_chat_id))
+    trainer = Trainer(cfg, store, backend, todos, make_sender(application.bot, cfg.owner_chat_id),
+                      calendar)
     application.bot_data["trainer"] = trainer
     application.bot_data["cfg"] = cfg
     register(application, trainer, cfg.owner_chat_id)
@@ -748,6 +831,12 @@ async def post_init(application: Application) -> None:
             log.info("Pripomienky: zoznam '%s' → %s", cfg.caldav_list, url)
         except Exception as e:  # noqa: BLE001
             log.warning("Pripomienky nedostupné pri štarte (%s) – skúsim neskôr.", e)
+    if trainer.calendar:
+        try:
+            url = await asyncio.to_thread(trainer.calendar.check)
+            log.info("Kalendár '%s' pripojený → %s", cfg.calendar_name, url)
+        except Exception as e:  # noqa: BLE001
+            log.warning("iCloud kalendár nedostupný pri štarte (%s) – skúsim neskôr.", e)
     try:
         await application.bot.set_my_commands([BotCommand(c, d) for c, d in BOT_COMMANDS])
     except Exception as e:  # noqa: BLE001
@@ -787,6 +876,8 @@ async def post_shutdown(application: Application) -> None:
     trainer: Trainer = application.bot_data["trainer"]
     if trainer.todos:
         trainer.todos.close()
+    if trainer.calendar:
+        trainer.calendar.close()
     trainer.store.close()
 
 

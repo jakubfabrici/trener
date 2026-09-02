@@ -12,31 +12,33 @@ D = date(2026, 9, 2)
 
 
 class FakeTodos:
+    component = "VTODO"
+
     def __init__(self):
         self.items = {}     # href -> (etag, ics)
         self.n = 0
 
     def list(self):
-        return [parse_item(h, e, ics) for h, (e, ics) in self.items.items()]
+        return [parse_item(h, e, ics, self.component) for h, (e, ics) in self.items.items()]
 
     def get(self, href):
         if href not in self.items:
             return None
         e, ics = self.items[href]
-        return parse_item(href, e, ics)
+        return parse_item(href, e, ics, self.component)
 
     def create(self, uid, ics):
         self.n += 1
         href = f"http://x/jakub/col/{uid}.ics"
         self.items[href] = (f'"{self.n}"', ics)
-        return parse_item(href, f'"{self.n}"', ics)
+        return parse_item(href, f'"{self.n}"', ics, self.component)
 
     def put(self, item, ics):
         assert item.href in self.items
         assert self.items[item.href][0] == item.etag, "stale etag"
         self.n += 1
         self.items[item.href] = (f'"{self.n}"', ics)
-        return parse_item(item.href, f'"{self.n}"', ics)
+        return parse_item(item.href, f'"{self.n}"', ics, self.component)
 
     def delete(self, item):
         self.items.pop(item.href, None)

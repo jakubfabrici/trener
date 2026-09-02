@@ -41,11 +41,13 @@ class TodoItem:
     completed: bool
     cal: Calendar                 # celý VCALENDAR (zachovávame cudzie vlastnosti)
 
+    component: str = "VTODO"
+
     @property
     def vtodo(self) -> Todo:
-        for c in self.cal.walk("VTODO"):
+        for c in self.cal.walk(self.component):
             return c
-        raise CalDavError("VCALENDAR bez VTODO")
+        raise CalDavError(f"VCALENDAR bez {self.component}")
 
 
 def _fmt_utc(dt: datetime) -> str:
@@ -87,13 +89,13 @@ def _alarm(due: datetime):
     return a
 
 
-def parse_item(href: str, etag: str, data: str | bytes) -> TodoItem | None:
+def parse_item(href: str, etag: str, data: str | bytes, component: str = "VTODO") -> TodoItem | None:
     try:
         cal = Calendar.from_ical(data)
     except Exception as e:  # noqa: BLE001
         log.warning("CalDAV: neviem rozparsovať %s: %s", href, e)
         return None
-    todos = list(cal.walk("VTODO"))
+    todos = list(cal.walk(component))
     if not todos:
         return None
     t = todos[0]
@@ -109,7 +111,8 @@ def parse_item(href: str, etag: str, data: str | bytes) -> TodoItem | None:
     pct = t.get("PERCENT-COMPLETE")
     completed = status == "COMPLETED" or t.get("COMPLETED") is not None or (
         pct is not None and int(pct) >= 100)
-    return TodoItem(href, etag, str(t.get("UID", "")), str(t.get("SUMMARY", "")), due, completed, cal)
+    return TodoItem(href, etag, str(t.get("UID", "")), str(t.get("SUMMARY", "")), due, completed, cal,
+                    component)
 
 
 def apply_changes(item: TodoItem, *, summary: str | None = None, due: datetime | None = None,
@@ -159,11 +162,14 @@ def apply_changes(item: TodoItem, *, summary: str | None = None, due: datetime |
 class TodoList:
     """Jeden zoznam úloh (kolekcia) na CalDAV serveri."""
 
+    component = "VTODO"
+
     def __init__(self, base_url: str, username: str, password: str, list_name: str,
-                 timeout: float = 20.0):
+                 timeout: float = 20.0, color: str | None = None):
         self.base_url = base_url if base_url.endswith("/") else base_url + "/"
         self.username = username
         self.list_name = list_name
+        self.color = color
         self.client = httpx.Client(auth=(username, password), timeout=timeout,
                                    headers={"User-Agent": "trener-klikov/2"}, follow_redirects=True)
         self.collection_url: str | None = None
@@ -238,7 +244,7 @@ class TodoList:
             name = resp.find(".//D:displayname", NS)
             comps = [c.get("name") for c in resp.findall(".//C:supported-calendar-component-set/C:comp", NS)]
             if name is not None and (name.text or "").strip() == self.list_name:
-                if not comps or "VTODO" in comps:
+                if not comps or self.component in comps:
                     return self._abs(href.text)
                 fallback = fallback or self._abs(href.text)
         return fallback
@@ -250,10 +256,13 @@ class TodoList:
         if url is None:
             home = self.calendar_home(self.principal_url())
             url = urljoin(home, str(uuid.uuid4()) + "/")
+            color = (f'<A:calendar-color>{self.color}</A:calendar-color>' if self.color else "")
             body = ('<?xml version="1.0" encoding="utf-8"?>'
-                    '<C:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:set><D:prop>'
-                    f'<D:displayname>{self.list_name}</D:displayname>'
-                    '<C:supported-calendar-component-set><C:comp name="VTODO"/></C:supported-calendar-component-set>'
+                    '<C:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" '
+                    'xmlns:A="http://apple.com/ns/ical/"><D:set><D:prop>'
+                    f'<D:displayname>{self.list_name}</D:displayname>{color}'
+                    f'<C:supported-calendar-component-set><C:comp name="{self.component}"/>'
+                    '</C:supported-calendar-component-set>'
                     '</D:prop></D:set></C:mkcalendar>')
             r = self._call("MKCALENDAR", url, content=body,
                            headers={"Content-Type": "application/xml; charset=utf-8"})
@@ -272,7 +281,8 @@ class TodoList:
         body = ('<?xml version="1.0" encoding="utf-8"?>'
                 '<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">'
                 '<D:prop><D:getetag/><C:calendar-data/></D:prop>'
-                '<C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VTODO"/></C:comp-filter></C:filter>'
+                f'<C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="{self.component}"/>'
+                '</C:comp-filter></C:filter>'
                 '</C:calendar-query>')
         r = self._req("REPORT", col, content=body,
                       headers={"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
@@ -290,7 +300,8 @@ class TodoList:
             data = resp.find(".//C:calendar-data", NS)
             if href is None or data is None or not data.text:
                 continue
-            item = parse_item(self._abs(href.text), (etag.text or "") if etag is not None else "", data.text)
+            item = parse_item(self._abs(href.text), (etag.text or "") if etag is not None else "", data.text,
+                              self.component)
             if item:
                 out.append(item)
         return out
@@ -301,7 +312,7 @@ class TodoList:
             return None
         if r.status_code >= 400:
             raise CalDavError(f"GET {href}: HTTP {r.status_code}")
-        return parse_item(href, r.headers.get("ETag", ""), r.content)
+        return parse_item(href, r.headers.get("ETag", ""), r.content, self.component)
 
     def create(self, uid: str, ics: bytes) -> TodoItem:
         col = self.ensure_collection()
@@ -313,7 +324,7 @@ class TodoList:
         if r.status_code not in (200, 201, 204):
             raise CalDavError(f"PUT {href}: HTTP {r.status_code} {r.text[:200]}")
         etag = r.headers.get("ETag", "")
-        item = parse_item(href, etag, ics)
+        item = parse_item(href, etag, ics, self.component)
         if not etag:
             fresh = self.get(href)
             if fresh:
@@ -331,7 +342,7 @@ class TodoList:
         if r.status_code not in (200, 201, 204):
             raise CalDavError(f"PUT {item.href}: HTTP {r.status_code} {r.text[:200]}")
         etag = r.headers.get("ETag", "")
-        new = parse_item(item.href, etag, ics)
+        new = parse_item(item.href, etag, ics, self.component)
         if not etag:
             fresh = self.get(item.href)
             if fresh:

@@ -80,7 +80,8 @@ def day_failed(day: Day, streak_before: int, today_goal: int) -> str:
 # ── stav / štatistiky ────────────────────────────────────────────────────────
 
 def status(day: Day, settings: Settings, streak: int, table_ok: bool, table_at: str | None,
-           reminders_ok: bool | None, next_goal: int) -> str:
+           reminders_ok: bool | None, next_goal: int, calendar_ok: bool | None = None,
+           calendar_name: str = "Kliky") -> str:
     st = day.status(day.date)
     icon = {DONE: "✅", FAILED: "❌", FROZEN: "❄️"}.get(st, "⏳")
     lines = [f"{icon} Dnes {d(day.date)}: {day.total}/{day.goal}"
@@ -94,6 +95,9 @@ def status(day: Day, settings: Settings, streak: int, table_ok: bool, table_at: 
         lines.append("❄️ ZAMRAZENÉ – nič nepripomínam, tabuľku ďalej sledujem. /odmraz na pokračovanie.")
     tbl = "✅" if table_ok else "⚠️ nedostupná"
     lines.append(f"📋 Tabuľka: {tbl}" + (f" (sync {table_at})" if table_at else ""))
+    if calendar_ok is not None:
+        lines.append(f"📅 Budík v kalendári „{calendar_name}“: "
+                     + ("✅ ráno aj večer" if calendar_ok else "⚠️ iCloud nedostupný"))
     if reminders_ok is not None:
         lines.append("📱 Pripomienky: " + ("✅" if reminders_ok else "⚠️ CalDAV nedostupný"))
     return "\n".join(lines)

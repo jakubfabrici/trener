@@ -34,6 +34,15 @@ class Config:
     reminders_mode: str
     reminders_list: str
     shortcut_token: str | None
+    # budík v iCloud kalendári (CalDAV) – ranný a večerný event s upozornením
+    calendar_mode: str            # "icloud" | "off"
+    calendar_url: str
+    calendar_user: str | None
+    calendar_password: str | None
+    calendar_name: str
+    calendar_color: str
+    calendar_minutes: int
+    calendar_sync_seconds: int
     # pripomienky (Radicale CalDAV)
     caldav_url: str | None
     caldav_username: str | None
@@ -69,6 +78,9 @@ def load() -> Config:
     backend = (_env("TABLE_BACKEND", "smb") or "smb").strip().lower()
     if backend not in ("smb", "local"):
         raise SystemExit(f"TABLE_BACKEND musí byť 'smb' alebo 'local' (je {backend!r}).")
+    cal_mode = (_env("CALENDAR_MODE", "icloud") or "icloud").strip().lower()
+    if cal_mode not in ("icloud", "off"):
+        raise SystemExit(f"CALENDAR_MODE musí byť 'icloud' alebo 'off' (je {cal_mode!r}).")
     mode = (_env("REMINDERS_MODE", "shortcuts") or "shortcuts").strip().lower()
     if mode not in ("shortcuts", "caldav", "off"):
         raise SystemExit(f"REMINDERS_MODE musí byť 'shortcuts', 'caldav' alebo 'off' (je {mode!r}).")
@@ -86,6 +98,14 @@ def load() -> Config:
         smb_password=_env("SMB_PASSWORD", ""),
         local_table_path=Path(_env("LOCAL_TABLE_PATH", "/var/lib/trener/kliky.xlsx")),
         table_sync_seconds=int(_env("TABLE_SYNC_SECONDS", "120")),
+        calendar_mode=cal_mode,
+        calendar_url=_env("CALENDAR_URL", "https://caldav.icloud.com/"),
+        calendar_user=_env("ICLOUD_USERNAME"),
+        calendar_password=_env("ICLOUD_APP_PASSWORD"),
+        calendar_name=_env("CALENDAR_NAME", "Kliky"),
+        calendar_color=_env("CALENDAR_COLOR", "#FF6B35"),
+        calendar_minutes=int(_env("CALENDAR_EVENT_MINUTES", "15")),
+        calendar_sync_seconds=int(_env("CALENDAR_SYNC_SECONDS", "120")),
         reminders_mode=mode,
         reminders_list=_env("REMINDERS_LIST", _env("CALDAV_LIST", "Kliky")),
         shortcut_token=_env("SHORTCUT_TOKEN") or _env("WAKE_WEBHOOK_TOKEN"),

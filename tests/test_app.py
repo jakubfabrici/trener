@@ -19,6 +19,14 @@ from trener.store import Store
 from trener.table import COL, SHEET_DAYS, SHEET_SETTINGS
 from test_reminders import FakeTodos
 
+
+class FakeCalendar(FakeTodos):
+    """Falošný iCloud kalendár – rovnaké rozhranie ako EventCalendar, len v pamäti."""
+    component = "VEVENT"
+
+    def events(self):
+        return sorted(self.list(), key=lambda i: i.summary)
+
 TZ = ZoneInfo("Europe/Bratislava")
 D = date(2026, 9, 2)
 
@@ -34,6 +42,9 @@ class Harness:
         cfg = Config(bot_token="x", owner_chat_id=1, tz=TZ, state_db=tmp / "t.db", log_file=None,
                      table_backend="local", smb_server="", smb_share="", smb_path="", smb_username="",
                      smb_password="", local_table_path=tmp / "kliky.xlsx", table_sync_seconds=120,
+                     calendar_mode="off", calendar_url="https://caldav.icloud.com/", calendar_user=None,
+                     calendar_password=None, calendar_name="Kliky", calendar_color="#FF6B35",
+                     calendar_minutes=15, calendar_sync_seconds=120,
                      reminders_mode="caldav", reminders_list="Kliky", shortcut_token="tok",
                      caldav_url=None, caldav_username=None, caldav_password=None, caldav_list="Kliky",
                      reminders_sync_seconds=120, web_port=0, wake_token=None, ha_alarm_url=None,
@@ -49,7 +60,12 @@ class Harness:
         if mode == "shortcuts":
             cfg = replace(cfg, reminders_mode="shortcuts")
         self.cfg = cfg
-        self.t = A.Trainer(cfg, self.store, self.backend, None, send)
+        self.cal = FakeCalendar()
+        if mode == "calendar":
+            cfg = replace(cfg, calendar_mode="icloud", reminders_mode="off")
+            self.cfg = cfg
+        self.t = A.Trainer(cfg, self.store, self.backend, None, send,
+                           self.cal if mode == "calendar" else None)
         if mode == "shortcuts":
             self.t.rem = None
             self.t.todos = None
@@ -104,6 +120,12 @@ class Harness:
 @pytest.fixture
 def h(tmp_path):
     return Harness(tmp_path, at(6, 0))
+
+
+@pytest.fixture
+def hc(tmp_path):
+    """Harness s budíkom v iCloud kalendári."""
+    return Harness(tmp_path, at(6, 0), mode="calendar")
 
 
 @pytest.fixture

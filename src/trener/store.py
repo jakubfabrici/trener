@@ -34,10 +34,25 @@ CREATE TABLE IF NOT EXISTS reminders (
     last_n INTEGER NOT NULL DEFAULT 0, user_unticked INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (date, session)
 );
+CREATE TABLE IF NOT EXISTS events (
+    date TEXT NOT NULL, session TEXT NOT NULL, href TEXT NOT NULL DEFAULT '', uid TEXT NOT NULL DEFAULT '',
+    etag TEXT NOT NULL DEFAULT '', last_summary TEXT NOT NULL DEFAULT '', last_due_hhmm TEXT NOT NULL DEFAULT '',
+    completed INTEGER NOT NULL DEFAULT 0, user_deleted INTEGER NOT NULL DEFAULT 0,
+    missing_seen INTEGER NOT NULL DEFAULT 0,
+    last_n INTEGER NOT NULL DEFAULT 0, user_unticked INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (date, session)
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
 SETTINGS_TYPES = {f.name: f.type for f in fields(Settings)}
+
+
+def _t(table: str) -> str:
+    """Povolené sú len naše dve tabuľky – žiadny vstup zvonku sa sem nedostane."""
+    if table not in ("reminders", "events"):
+        raise ValueError(table)
+    return table
 
 
 def _to_str(v) -> str:
@@ -163,9 +178,9 @@ class Store:
                         n.last_at.isoformat() if n.last_at else None))
         self.c.commit()
 
-    # ── pripomienky ─────────────────────────────────────────────────────────
-    def get_reminder(self, d: date, session: str) -> ReminderState | None:
-        r = self.c.execute("SELECT * FROM reminders WHERE date=? AND session=?",
+    # ── pripomienky (a rovnakým spôsobom kalendárové eventy) ────────────────
+    def get_reminder(self, d: date, session: str, table: str = "reminders") -> ReminderState | None:
+        r = self.c.execute(f"SELECT * FROM {_t(table)} WHERE date=? AND session=?",
                            (d.isoformat(), session)).fetchone()
         if not r:
             return None
@@ -173,18 +188,18 @@ class Store:
                              r["last_due_hhmm"], bool(r["completed"]), bool(r["user_deleted"]),
                              r["missing_seen"], r["last_n"], bool(r["user_unticked"]))
 
-    def reminders_before(self, d: date) -> list[ReminderState]:
+    def reminders_before(self, d: date, table: str = "reminders") -> list[ReminderState]:
         out = []
-        for r in self.c.execute("SELECT * FROM reminders WHERE date<? ORDER BY date", (d.isoformat(),)):
+        for r in self.c.execute(f"SELECT * FROM {_t(table)} WHERE date<? ORDER BY date", (d.isoformat(),)):
             out.append(ReminderState(date.fromisoformat(r["date"]), r["session"], r["href"], r["uid"],
                                      r["etag"], r["last_summary"], r["last_due_hhmm"],
                                      bool(r["completed"]), bool(r["user_deleted"]), r["missing_seen"],
                                      r["last_n"], bool(r["user_unticked"])))
         return out
 
-    def save_reminder(self, s: ReminderState) -> None:
+    def save_reminder(self, s: ReminderState, table: str = "reminders") -> None:
         self.c.execute(
-            "INSERT INTO reminders (date, session, href, uid, etag, last_summary, last_due_hhmm,"
+            f"INSERT INTO {_t(table)} (date, session, href, uid, etag, last_summary, last_due_hhmm,"
             " completed, user_deleted, missing_seen, last_n, user_unticked) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(date, session) DO UPDATE SET href=excluded.href, uid=excluded.uid,"
             " etag=excluded.etag, last_summary=excluded.last_summary, last_due_hhmm=excluded.last_due_hhmm,"
@@ -194,8 +209,8 @@ class Store:
              int(s.completed), int(s.user_deleted), s.missing_seen, s.last_n, int(s.user_unticked)))
         self.c.commit()
 
-    def delete_reminder(self, d: date, session: str) -> None:
-        self.c.execute("DELETE FROM reminders WHERE date=? AND session=?", (d.isoformat(), session))
+    def delete_reminder(self, d: date, session: str, table: str = "reminders") -> None:
+        self.c.execute(f"DELETE FROM {_t(table)} WHERE date=? AND session=?", (d.isoformat(), session))
         self.c.commit()
 
     # ── meta ────────────────────────────────────────────────────────────────
