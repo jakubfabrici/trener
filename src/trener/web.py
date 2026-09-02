@@ -13,11 +13,19 @@ log = logging.getLogger("trener.web")
 
 
 def _client_is_local(handler: BaseHTTPRequestHandler) -> bool:
-    """Za reverse proxy (NPM) rozhoduje X-Forwarded-For; priamy klient podľa peer IP."""
-    xff = handler.headers.get("X-Forwarded-For", "")
-    ip = (xff.split(",")[0].strip() if xff else handler.client_address[0])
+    """Priamy peer musí byť z LAN; za reverse proxy (NPM) platí POSLEDNÝ záznam v
+    X-Forwarded-For – ten pridáva proxy, predchádzajúce si môže klient podvrhnúť."""
     try:
-        return ipaddress.ip_address(ip).is_private
+        peer = ipaddress.ip_address(handler.client_address[0])
+    except ValueError:
+        return False
+    if not peer.is_private:
+        return False
+    xff = handler.headers.get("X-Forwarded-For", "")
+    if not xff:
+        return True
+    try:
+        return ipaddress.ip_address(xff.split(",")[-1].strip()).is_private
     except ValueError:
         return False
 

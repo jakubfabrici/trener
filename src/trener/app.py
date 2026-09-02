@@ -197,20 +197,24 @@ class Trainer:
         self.rem_dirty = True
 
     # ── tabuľka ─────────────────────────────────────────────────────────────
+    async def _guarded(self, flag: str, fn, *args, timeout: float):
+        """Spustí blokujúcu operáciu vo vlákne s timeoutom. Pri timeoute vlákno beží ďalej –
+        zámok (`flag`) sa uvoľní až keď naozaj skončí, aby sa nespustila druhá kópia."""
+        setattr(self, flag, True)
+        fut = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+        fut.add_done_callback(lambda _f: setattr(self, flag, False))
+        return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
+
     async def _sync_table(self) -> None:
         if self._table_inflight:
             log.warning("Tabuľka: predchádzajúca operácia ešte beží (visí sieť?) – preskakujem.")
             return
-        self._table_inflight = True
-        try:
-            await self._sync_table_inner()
-        finally:
-            self._table_inflight = False
+        await self._sync_table_inner()
 
     async def _sync_table_inner(self) -> None:
         today = self.now().date()
         try:
-            res = await asyncio.wait_for(asyncio.to_thread(self.backend.read), timeout=30)
+            res = await self._guarded("_table_inflight", self.backend.read, timeout=30)
         except asyncio.TimeoutError:
             await self._table_failure("čítanie trvá pridlho (NAS neodpovedá)")
             return
@@ -251,7 +255,7 @@ class Trainer:
             streaks = {d.date: streak_after(m.days, d.date, today) for d in m.days}
             data = await asyncio.to_thread(render_workbook, existing, m.days, m.settings, streaks, today, parsed)
             try:
-                stamp = await asyncio.wait_for(asyncio.to_thread(self.backend.write, data, stamp), timeout=30)
+                stamp = await self._guarded("_table_inflight", self.backend.write, data, stamp, timeout=30)
                 log.info("Tabuľka zapísaná (%d dní).", len(m.days))
             except Conflict:
                 log.info("Tabuľka sa medzitým zmenila – skúsim v ďalšom ticku.")
@@ -323,11 +327,10 @@ class Trainer:
             return
         today = day if day is not None else self.today_day()
         settings = self.settings()
-        self._rem_inflight = True
         try:
-            out = await asyncio.wait_for(asyncio.to_thread(self.rem.sync, today, settings, allow_create), timeout=40)
+            out = await self._guarded("_rem_inflight", self.rem.sync, today, settings, allow_create, timeout=40)
         except asyncio.TimeoutError:
-            log.warning("Pripomienky: sync trvá pridlho (Radicale neodpovedá).")
+            log.warning("Pripomienky: sync trvá pridlho (Radicale neodpovedá) – počkám, kým dobehne.")
             self.rem_ok = False
             return
         except Exception as e:  # noqa: BLE001 – pripomienky nesmú zhodiť tick (výzvy, oznámenia)
@@ -335,8 +338,6 @@ class Trainer:
                 log.warning("Pripomienky: neočakávaná chyba: %s", e, exc_info=True)
             self.rem_ok = False
             return
-        finally:
-            self._rem_inflight = False
         for n in out.notes:
             log.info("Pripomienky: %s", n)
         if out.errors:
@@ -418,18 +419,24 @@ class Trainer:
         async with self.lock:
             now = self.now()
             await self._rollover_if_needed(now)
-            if when is not None:
-                when_local = when.astimezone(self.tz)
-                if when_local.date() != now.date():
-                    # správa z fronty po výpadku (Telegram ich doručí dodatočne) – patrí inému dňu
-                    log.info("Stará správa z %s ignorovaná: %r", when_local.isoformat(timespec="minutes"), text)
-                    return M.STALE_MESSAGE.format(when=f"{when_local.day}.{when_local.month}. {when_local:%H:%M}")
             s = self.settings()
-            pr = parse_message(text, default_session(now, s))
+            sent_at = when.astimezone(self.tz) if when is not None else now
+            forced_offset = 0
+            if sent_at.date() != now.date():
+                if sent_at.date() == now.date() - timedelta(days=1) and elapsed(now, sent_at) <= timedelta(minutes=5):
+                    forced_offset = -1          # odoslané tesne pred polnocou, spracované po nej → včerajšok
+                else:
+                    # správa z fronty po výpadku (Telegram ich doručí dodatočne) – patrí inému dňu
+                    log.info("Stará správa z %s ignorovaná: %r", sent_at.isoformat(timespec="minutes"), text)
+                    return M.STALE_MESSAGE.format(when=f"{sent_at.day}.{sent_at.month}. {sent_at:%H:%M}")
+            # fáza podľa času ODOSLANIA (po výpadku sa správy doručia neskôr)
+            pr = parse_message(text, default_session(sent_at, s))
             if not pr.ok:
                 return M.ERRORS.get(pr.error or "no_number", M.NOT_A_NUMBER)
             today = now.date()
-            offset = pr.reports[0].day_offset
+            offset = pr.reports[0].day_offset or forced_offset
+            for r in pr.reports:
+                r.day_offset = offset
             if offset:
                 target_date = today + timedelta(days=offset)
                 target = self.store.get_day(target_date)
@@ -583,21 +590,31 @@ def main() -> None:
                                 .post_init(post_init).post_stop(post_stop)
                                 .post_shutdown(post_shutdown).build())
 
-    async def send(text: str) -> None:
-        for attempt in range(3):
-            try:
-                await application.bot.send_message(chat_id=cfg.owner_chat_id, text=text)
-                return
-            except Exception as e:  # noqa: BLE001
-                log.warning("Telegram send zlyhal (%d/3): %s", attempt + 1, e)
-                await asyncio.sleep(2 * (attempt + 1))
-
-    trainer = Trainer(cfg, store, backend, todos, send)
+    trainer = Trainer(cfg, store, backend, todos, make_sender(application.bot, cfg.owner_chat_id))
     application.bot_data["trainer"] = trainer
     application.bot_data["cfg"] = cfg
     register(application, trainer, cfg.owner_chat_id)
     log.info("Štartujem polling…")
     application.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
+
+
+def make_sender(bot, chat_id: int):
+    """Odoslanie správy majiteľovi. Po TimedOut/RetryAfter sa NEOPAKUJE – Telegram správu
+    zrejme prijal a druhý pokus by ju doručil dvakrát (výzvy majú tvrdý limit)."""
+    from telegram.error import RetryAfter, TimedOut
+
+    async def send(text: str) -> None:
+        for attempt in range(3):
+            try:
+                await bot.send_message(chat_id=chat_id, text=text)
+                return
+            except (TimedOut, RetryAfter) as e:
+                log.warning("Telegram send: %s – neopakujem (riziko duplicity).", e)
+                return
+            except Exception as e:  # noqa: BLE001
+                log.warning("Telegram send zlyhal (%d/3): %s", attempt + 1, e)
+                await asyncio.sleep(2 * (attempt + 1))
+    return send
 
 
 async def post_init(application: Application) -> None:

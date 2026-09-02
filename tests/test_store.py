@@ -29,3 +29,14 @@ def test_days_settings_nags_reminders_round_trip():
     assert s.get_meta("k") == "v"
     s.set_meta("k", None)
     assert s.get_meta("k") is None
+
+
+def test_config_rejects_unknown_backend(monkeypatch):
+    import pytest
+    from trener import config as C
+    for k, v in {"BOT_TOKEN": "t", "OWNER_CHAT_ID": "1", "TABLE_BACKEND": "SMB", "SMB_USERNAME": "u", "SMB_PASSWORD": "p"}.items():
+        monkeypatch.setenv(k, v)
+    assert C.load().table_backend == "smb"           # veľkosť písmen sa normalizuje
+    monkeypatch.setenv("TABLE_BACKEND", "samba")
+    with pytest.raises(SystemExit):
+        C.load()

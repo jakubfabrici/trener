@@ -62,13 +62,16 @@ def load() -> Config:
     owner = _env("OWNER_CHAT_ID")
     if not owner or not owner.lstrip("-").isdigit():
         raise SystemExit("Chýba OWNER_CHAT_ID (číslo tvojho Telegram chatu).")
+    backend = (_env("TABLE_BACKEND", "smb") or "smb").strip().lower()
+    if backend not in ("smb", "local"):
+        raise SystemExit(f"TABLE_BACKEND musí byť 'smb' alebo 'local' (je {backend!r}).")
     return Config(
         bot_token=token,
         owner_chat_id=int(owner),
         tz=ZoneInfo(_env("TZ_NAME", "Europe/Bratislava")),
         state_db=Path(_env("STATE_DB", "/var/lib/trener/trener.db")),
         log_file=Path(_env("LOG_FILE")) if _env("LOG_FILE") else None,
-        table_backend=_env("TABLE_BACKEND", "smb"),
+        table_backend=backend,
         smb_server=_env("SMB_SERVER", "192.168.1.185"),
         smb_share=_env("SMB_SHARE", "share"),
         smb_path=_env("SMB_PATH", "Kliky/kliky.xlsx"),

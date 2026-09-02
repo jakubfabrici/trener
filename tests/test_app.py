@@ -342,3 +342,53 @@ def test_stale_message_from_yesterday_ignored(h):
     assert "nepočítam" in reply and h.store.get_day(D).total == 0
     reply = asyncio.run(h.t.handle_text("5", when=at(7, 0)))
     assert "dnes 5/12" in reply
+
+
+def test_delayed_same_day_message_uses_send_time_for_session(h):
+    h.tick_at(at(6, 0))
+    # odoslané 18:45 (ranná fáza), spracované 19:30 po reštarte → ráno, nie večer
+    reply = asyncio.run(h.t.handle_text("6", when=at(18, 45)))
+    assert "ráno 6/6" in reply
+    h.clock[0] = at(19, 30)
+    reply = asyncio.run(h.t.handle_text("3", when=at(18, 50)))
+    assert "ráno 9/6" in reply and h.store.get_day(D).evening == 0
+
+
+def test_message_just_before_midnight_counts_for_yesterday(h):
+    h.tick_at(at(6, 0))
+    nd = D + timedelta(days=1)
+    h.tick_at(at(0, 0, 30, nd)); h.take()
+    reply = asyncio.run(h.t.handle_text("12", when=at(23, 59, 50)))   # spracované 00:00:30
+    assert "včera 12/12" in reply and h.store.get_day(D).done and h.store.get_day(nd).total == 0
+
+
+def test_timeout_keeps_inflight_until_thread_finishes(h):
+    import threading
+    h.tick_at(at(6, 0))
+    gate = threading.Event()
+    real_list = h.todos.list
+
+    def slow_list():
+        gate.wait(5)
+        return real_list()
+    h.todos.list = slow_list
+    orig = h.t._guarded
+
+    async def fast_guarded(flag, fn, *args, timeout):
+        return await orig(flag, fn, *args, timeout=0.2)
+    h.t._guarded = fast_guarded
+
+    async def scenario():
+        h.t.rem_dirty = True
+        await h.t._sync_reminders()                 # timeout po 0.2 s, vlákno beží ďalej
+        assert h.t._rem_inflight is True and h.t.rem_ok is False
+        await h.t._sync_reminders()                 # druhá kópia sa nespustí
+        assert h.t._rem_inflight is True
+        gate.set()
+        await asyncio.sleep(0.5)                    # vlákno dobehlo → zámok sa uvoľnil
+        assert h.t._rem_inflight is False
+        h.t._guarded = orig
+        h.todos.list = real_list
+        await h.t._sync_reminders()
+        assert h.t.rem_ok is True and h.t._rem_inflight is False
+    asyncio.run(scenario())

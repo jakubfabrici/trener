@@ -80,7 +80,6 @@ class ReminderSync:
     # ── hlavný sync ─────────────────────────────────────────────────────────
     def sync(self, today: Day, settings: Settings, allow_create: bool = True) -> SyncOutcome:
         out = SyncOutcome(settings=settings.copy())
-        self._allow_create = allow_create
         try:
             items = self.todos.list()
         except Exception as e:  # noqa: BLE001 – CalDAV je best-effort, tick musí bežať ďalej
@@ -106,7 +105,7 @@ class ReminderSync:
         for session in SESSIONS:
             before = len(out.reports)
             try:
-                self._sync_session(today, session, out, by_uid, by_href)
+                self._sync_session(today, session, out, by_uid, by_href, allow_create)
             except Conflict:
                 out.notes.append(f"{session}: pripomienku práve menil telefón – skúsim o chvíľu")
             except Exception as e:  # noqa: BLE001
@@ -116,7 +115,8 @@ class ReminderSync:
         return out
 
     def _sync_session(self, today: Day, session: str, out: SyncOutcome,
-                      by_uid: dict[str, TodoItem], by_href: dict[str, TodoItem]) -> None:
+                      by_uid: dict[str, TodoItem], by_href: dict[str, TodoItem],
+                      allow_create: bool = True) -> None:
         settings = out.settings
         st = self.store.get_reminder(today.date, session) or ReminderState(today.date, session)
         item = None
@@ -189,7 +189,7 @@ class ReminderSync:
         desired_due = due_for(today.date, settings.session_time(session), self.tz)
 
         if item is None:
-            if frozen or st.user_deleted or session_done or not getattr(self, "_allow_create", True):
+            if frozen or st.user_deleted or session_done or not allow_create:
                 self.store.save_reminder(st)
                 return
             uid = f"kliky-{today.date.isoformat()}-{session}-{uuid.uuid4().hex[:6]}"

@@ -29,11 +29,16 @@ def test_wake_and_health():
         # LAN klient (priamo z 127.0.0.1) vidí detaily
         d = json.loads(urllib.request.urlopen(base + "/health").read())
         assert d["today"]["goal"] == 12 and d["ok"]
-        # klient z internetu cez proxy (X-Forwarded-For) vidí len ok
-        req = urllib.request.Request(base + "/health", headers={"X-Forwarded-For": "8.8.8.8, 192.168.1.213"})
+        # klient z internetu cez proxy: NPM pridá skutočnú IP na KONIEC X-Forwarded-For → len ok
+        req = urllib.request.Request(base + "/health", headers={"X-Forwarded-For": "8.8.8.8"})
         d2 = json.loads(urllib.request.urlopen(req).read())
         assert d2 == {"ok": True}
+        req = urllib.request.Request(base + "/health", headers={"X-Forwarded-For": "192.168.1.213, 8.8.8.8"})
+        assert json.loads(urllib.request.urlopen(req).read()) == {"ok": True}
         req = urllib.request.Request(base + "/health", headers={"X-Forwarded-For": "192.168.1.50"})
         assert "today" in json.loads(urllib.request.urlopen(req).read())
+        # podvrhnutý privátny prefix pred skutočnou IP (NPM appenduje) → stále len ok
+        req = urllib.request.Request(base + "/health", headers={"X-Forwarded-For": "10.0.0.1, 203.0.113.5"})
+        assert json.loads(urllib.request.urlopen(req).read()) == {"ok": True}
     finally:
         srv.shutdown()
