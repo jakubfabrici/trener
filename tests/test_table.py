@@ -263,3 +263,13 @@ def test_empty_goal_cell_keeps_bot_goal():
     p2.days[D].morning = None
     m2 = merge(p2, [(bot, bot)], Settings(), {}, D)
     assert m2.days[0].morning == 0
+
+
+def test_no_write_churn_with_zero_totals_today():
+    day = Day(D, 12, 0, 0)
+    s = Settings()
+    synced_settings = {k: ("1" if v is True else "0" if v is False else str(v)) for k, v in vars(s).items()}
+    data = render([day], s)
+    p = parse_workbook(data)
+    m = merge(p, [(day, day)], s, synced_settings, D)
+    assert not m.to_table, m

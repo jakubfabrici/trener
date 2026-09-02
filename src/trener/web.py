@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import logging
 import threading
@@ -11,12 +12,23 @@ from urllib.parse import parse_qs, urlparse
 log = logging.getLogger("trener.web")
 
 
+def _client_is_local(handler: BaseHTTPRequestHandler) -> bool:
+    """Za reverse proxy (NPM) rozhoduje X-Forwarded-For; priamy klient podľa peer IP."""
+    xff = handler.headers.get("X-Forwarded-For", "")
+    ip = (xff.split(",")[0].strip() if xff else handler.client_address[0])
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
+
 def start_web_server(port: int, token: str | None, on_wake, health) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             u = urlparse(self.path)
             if u.path == "/health":
-                body = json.dumps(health(), ensure_ascii=False, default=str).encode("utf-8")
+                data = health() if _client_is_local(self) else {"ok": True}   # z internetu len „žijem“
+                body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -25,7 +37,7 @@ def start_web_server(port: int, token: str | None, on_wake, health) -> Threading
                 return
             if u.path == "/wake":
                 got = parse_qs(u.query).get("token", [""])[0]
-                if token and hmac.compare_digest(got, token):
+                if token and hmac.compare_digest(got.encode("utf-8"), token.encode("utf-8")):
                     on_wake()
                     self._plain(200, "OK")
                 else:

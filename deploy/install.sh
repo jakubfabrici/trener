@@ -33,11 +33,16 @@ echo ">> Radicale (pip) → $RAD_DIR"
 [ -f "$RAD_CFG/config" ] || cp "$APP_DIR/deploy/radicale.config" "$RAD_CFG/config"
 if [ ! -f "$RAD_CFG/users" ]; then
   : "${RADICALE_USER:=jakub}"
+  # heslo: z env RADICALE_PASSWORD, alebo zo súboru .password-initial (bootstrap ho pushne), inak náhodné
+  if [ -z "${RADICALE_PASSWORD:-}" ] && [ -f "$RAD_CFG/.password-initial" ]; then
+    RADICALE_PASSWORD="$(cat "$RAD_CFG/.password-initial")"
+  fi
   : "${RADICALE_PASSWORD:=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)}"
-  HASH=$("$RAD_DIR/.venv/bin/python" -c "import bcrypt,sys;print(bcrypt.hashpw(sys.argv[1].encode(),bcrypt.gensalt()).decode())" "$RADICALE_PASSWORD")
-  echo "$RADICALE_USER:$HASH" > "$RAD_CFG/users"
+  # hash sa počíta z stdin – heslo sa neobjaví v argumentoch procesu ani v logu
+  HASH=$(printf '%s' "$RADICALE_PASSWORD" | "$RAD_DIR/.venv/bin/python" -c "import bcrypt,sys;print(bcrypt.hashpw(sys.stdin.read().encode(),bcrypt.gensalt()).decode())")
+  printf '%s:%s\n' "$RADICALE_USER" "$HASH" > "$RAD_CFG/users"
   echo "   Radicale používateľ: $RADICALE_USER (heslo je v $CFG_DIR/trener.env ako CALDAV_PASSWORD – nelogujeme ho)"
-  (umask 077; echo "$RADICALE_PASSWORD" > "$RAD_CFG/.password-initial")
+  (umask 077; printf '%s' "$RADICALE_PASSWORD" > "$RAD_CFG/.password-initial")
 fi
 chown -R radicale:radicale /var/lib/radicale
 chown root:radicale "$RAD_CFG/users" "$RAD_CFG/config"; chmod 640 "$RAD_CFG/users" "$RAD_CFG/config"
@@ -46,7 +51,14 @@ echo ">> konfigurácia trénera"
 if [ ! -f "$CFG_DIR/trener.env" ]; then
   cp "$APP_DIR/deploy/trener.env.example" "$CFG_DIR/trener.env"
   if [ -f "$RAD_CFG/.password-initial" ]; then
-    sed -i "s|^CALDAV_PASSWORD=.*|CALDAV_PASSWORD=$(cat "$RAD_CFG/.password-initial")|" "$CFG_DIR/trener.env"
+    # bez sed – heslo môže obsahovať |, &, ' a pod.
+    PW_FILE="$RAD_CFG/.password-initial" ENV_FILE="$CFG_DIR/trener.env" python3 - <<'PY'
+import os, pathlib
+pw = pathlib.Path(os.environ["PW_FILE"]).read_text()
+env = pathlib.Path(os.environ["ENV_FILE"])
+lines = [("CALDAV_PASSWORD=" + pw) if l.startswith("CALDAV_PASSWORD=") else l for l in env.read_text().splitlines()]
+env.write_text("\n".join(lines) + "\n")
+PY
     rm -f "$RAD_CFG/.password-initial"
   fi
   sed -i "s|^WAKE_WEBHOOK_TOKEN=.*|WAKE_WEBHOOK_TOKEN=$(openssl rand -hex 24)|" "$CFG_DIR/trener.env"

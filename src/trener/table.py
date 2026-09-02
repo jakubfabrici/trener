@@ -251,8 +251,10 @@ def parse_workbook(data: bytes) -> Parsed:
                 if isinstance(fv, str) and fv.startswith("="):
                     formulas.add(name)
                 vals[name] = cell_int(ws_v.cell(r, c).value)
-            status_text = str(ws_v.cell(r, layout["status"]).value or "").strip() if "status" in layout else ""
-            total_text = str(ws_v.cell(r, layout["total"]).value or "").strip() if "total" in layout else ""
+            sv = ws_v.cell(r, layout["status"]).value if "status" in layout else None
+            status_text = "" if sv is None else str(sv).strip()
+            tv = ws_v.cell(r, layout["total"]).value if "total" in layout else None
+            total_text = "" if tv is None else str(tv).strip()          # 0 je platná hodnota, nie „prázdne“
             note = ws_v.cell(r, layout["note"]).value if "note" in layout else None
             extra = {c: ws_f.cell(r, c).value for c in range(1, ws_v.max_column + 1)
                      if c not in known_cols and ws_f.cell(r, c).value is not None}

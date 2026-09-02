@@ -326,3 +326,19 @@ def test_excel_holding_file_is_not_an_outage(h):
     h.backend.write = real_write
     h.tick_at(at(7, 45))
     assert not h.t.table_busy and h.table_rows()[D][1] == 2
+
+
+def test_no_table_write_churn(h):
+    h.tick_at(at(6, 0))
+    m1 = h.cfg.local_table_path.stat().st_mtime_ns
+    for i in range(1, 8):
+        h.tick_at(at(6, 2 * i, 5))
+    assert h.cfg.local_table_path.stat().st_mtime_ns == m1
+
+
+def test_stale_message_from_yesterday_ignored(h):
+    h.tick_at(at(6, 0))
+    reply = asyncio.run(h.t.handle_text("5", when=at(21, 0, 0, D - timedelta(days=1))))
+    assert "nepočítam" in reply and h.store.get_day(D).total == 0
+    reply = asyncio.run(h.t.handle_text("5", when=at(7, 0)))
+    assert "dnes 5/12" in reply

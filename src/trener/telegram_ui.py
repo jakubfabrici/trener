@@ -102,7 +102,7 @@ def register(app: Application, trainer, owner_chat_id: int) -> None:
     async def on_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         text = update.message.text or ""
         log.info("Správa: %r", text)
-        reply = await trainer.handle_text(text)
+        reply = await trainer.handle_text(text, update.message.date)
         await update.message.reply_text(reply)
 
     async def on_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:

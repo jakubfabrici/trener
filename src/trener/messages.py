@@ -40,6 +40,8 @@ NOT_A_NUMBER = ("Nerozumiem. Napíš číslo – koľko klikov si práve dal (na
 LOOKS_LIKE_TIME = "To vyzerá ako čas alebo dátum, nie počet klikov. Časy sa menia cez /rano HH:MM a /vecer HH:MM."
 ZERO = "Nula sa nepočíta 😤 (ak chceš opraviť, napíš napr. „ráno = 0“)."
 TOO_BIG = "To je priveľa naraz (max 1000). Ak to nie je preklep, pošli to po častiach."
+STALE_MESSAGE = ("⏳ Táto správa je z {when} – vtedy som nebežal, tak ju do dneška nepočítam. "
+                 "Ak platí, napíš „včera 5“ / „včera večer 5“, alebo to doplň v tabuľke.")
 AMBIGUOUS = ("Viac čísel naraz a neviem, ktoré je ktoré. Napíš jedno číslo („5“), alebo ku každému fázu "
              "(„2 ráno a 3 večer“); dve série po päť napíš ako „2x5“.")
 ERRORS = {"no_number": NOT_A_NUMBER, "looks_like_time": LOOKS_LIKE_TIME, "zero": ZERO, "too_big": TOO_BIG,

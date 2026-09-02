@@ -414,10 +414,16 @@ class Trainer:
         self.kick()
         return res
 
-    async def handle_text(self, text: str) -> str:
+    async def handle_text(self, text: str, when: datetime | None = None) -> str:
         async with self.lock:
             now = self.now()
             await self._rollover_if_needed(now)
+            if when is not None:
+                when_local = when.astimezone(self.tz)
+                if when_local.date() != now.date():
+                    # správa z fronty po výpadku (Telegram ich doručí dodatočne) – patrí inému dňu
+                    log.info("Stará správa z %s ignorovaná: %r", when_local.isoformat(timespec="minutes"), text)
+                    return M.STALE_MESSAGE.format(when=f"{when_local.day}.{when_local.month}. {when_local:%H:%M}")
             s = self.settings()
             pr = parse_message(text, default_session(now, s))
             if not pr.ok:
