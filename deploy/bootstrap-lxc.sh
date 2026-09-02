@@ -37,6 +37,6 @@ tar -C "$REPO_DIR" --exclude=.git --exclude=.venv --exclude=__pycache__ --exclud
 inct "rm -rf /opt/trener-src && mkdir -p /opt/trener-src"
 pct push "$VMID" "$TARBALL" /tmp/trener-src.tar.gz
 inct "tar -C /opt/trener-src -xzf /tmp/trener-src.tar.gz && rm -f /tmp/trener-src.tar.gz"
-inct "RADICALE_USER='${RADICALE_USER:-jakub}' RADICALE_PASSWORD='${RADICALE_PASSWORD:-}' SRC_DIR=/opt/trener-src bash /opt/trener-src/deploy/install.sh"
+inct "RADICALE_USER='${RADICALE_USER:-jakub}' RADICALE_PASSWORD='${RADICALE_PASSWORD:-}' NO_START='${NO_START:-}' SRC_DIR=/opt/trener-src bash /opt/trener-src/deploy/install.sh"
 rm -f "$TARBALL"
 say "HOTOVO – ďalej: doplň /etc/trener/trener.env v kontajneri a reštartni: pct exec $VMID -- systemctl restart trener"

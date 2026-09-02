@@ -61,7 +61,11 @@ systemctl daemon-reload
 systemctl enable radicale trener >/dev/null
 systemctl restart radicale
 sleep 1
-systemctl restart trener || true
+if [ -n "${NO_START:-}" ]; then
+  echo "   NO_START nastavené – trener nespúšťam (spusti: systemctl start trener)"
+else
+  systemctl restart trener || true
+fi
 echo
 echo "Hotovo. Kontrola:"
 echo "  systemctl status radicale trener --no-pager"
