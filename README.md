@@ -18,9 +18,12 @@ ako jediný zdroj pravdy. Beží v samostatnom LXC kontajneri na Proxmoxe (`tren
   - **odškrtneš** ju → fáza sa berie ako splnená a zapíše sa do tabuľky,
   - **zmažeš** ju → dnes sa už nevytvorí, zajtra normálne.
 - **Chat (Telegram)**: kliky hlásiš číslom. „2“ = +2 do aktuálnej fázy (pred večerným časom
-  ráno, potom večer); „2 ráno“, „5 večer“, „2 ráno a 3 večer“, „dal som dva ráno“ fungujú
-  tiež; „ráno = 5“ alebo `/oprav ráno 5` nastaví presnú hodnotu. Číslo **nikdy** nemení
-  nastavenia (to bola chyba v1). Odpoveď vždy ukáže obe vedrá a zostatok.
+  ráno, potom večer); „2 ráno“, „5 večer“, „2 ráno a 3 večer“, „dal som dva ráno“, „2x5“
+  (dve série po päť = 10), „-2“ / „uber 2“ (oprava dole), „spolu 10“ (dnešný súčet má byť 10),
+  „včera večer 5“ (dopísať včerajšok) fungujú tiež; „ráno = 5“ alebo `/oprav ráno 5` nastaví
+  presnú hodnotu. Viac čísel bez určenia fázy („3. séria 5“) bot radšej odmietne, než by
+  hádal. Číslo **nikdy** nemení nastavenia (to bola chyba v1). Odpoveď vždy ukáže obe vedrá
+  a zostatok. Editované správy sa ignorujú (aby sa oprava čísla nezarátala dvakrát).
 - **Výzvy v chate**: na začiatku fázy jedna správa a potom **max 3× po 30 min**
   (nastaviteľné), kým fáza nie je splnená. Po reštarte sa staré výzvy nedoháňajú.
   Žiadne HA kritické budíky, žiadne iCloud eventy, žiadne polnočné eseje – len jedna
@@ -101,7 +104,7 @@ Kontrola: `curl -s http://192.168.1.254:8790/health` (stav tabuľky, pripomienok
   v tabuľke. Zmazať DB = bot si všetko načíta z tabuľky (stratí len históriu výziev).
 - Radicale dáta: `/var/lib/radicale/collections/collection-root/jakub/…` (záloha = kópia
   adresára; pri kopírovaní za behu použi `flock /var/lib/radicale/collections/.Radicale.lock`).
-- Testy: `python -m pytest trener/tests` (76 testov vrátane integračného proti reálnemu
-  Radicale, ak je nainštalované).
+- Testy: `python -m pytest trener/tests` (100 testov: parsovanie, engine, tabuľka, pripomienky,
+  end-to-end simulácia dní a integračný test proti reálnemu Radicale, ak je nainštalované).
 
 Diagnóza pôvodnej verzie: [docs/DIAGNOZA-v1.md](docs/DIAGNOZA-v1.md).
