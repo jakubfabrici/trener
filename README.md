@@ -22,8 +22,11 @@ ako jediný zdroj pravdy. Beží v samostatnom LXC kontajneri na Proxmoxe (`tren
   (dve série po päť = 10), „-2“ / „uber 2“ (oprava dole), „spolu 10“ (dnešný súčet má byť 10),
   „včera večer 5“ (dopísať včerajšok) fungujú tiež; „ráno = 5“ alebo `/oprav ráno 5` nastaví
   presnú hodnotu. Viac čísel bez určenia fázy („3. séria 5“) bot radšej odmietne, než by
-  hádal. Číslo **nikdy** nemení nastavenia (to bola chyba v1). Odpoveď vždy ukáže obe vedrá
-  a zostatok. Editované správy sa ignorujú (aby sa oprava čísla nezarátala dvakrát).
+  hádal. Číslo **nikdy** nemení nastavenia (to bola chyba v1) – cieľ sa mení cez `/ciel`
+  (tlačidlá s hodnotami) alebo `/ciel 10`. Pod každým hlásením sú tlačidlá **↩️ Vrátiť**
+  a **🎯 Bol to cieľ, nie kliky**, keby si sa pomýlil. Odpoveď je v riadkoch: ráno, večer,
+  dnes a zostatok. Editované správy sa ignorujú (aby sa oprava čísla nezarátala dvakrát).
+  Oprava nadol (chat, tabuľka, ↩️) zruší aj odčiarknutie pripomienky.
 - **Výzvy v chate**: na začiatku fázy jedna správa a potom **max 3× po 30 min**
   (nastaviteľné), kým fáza nie je splnená. Po reštarte sa staré výzvy nedoháňajú.
   Žiadne HA kritické budíky, žiadne iCloud eventy, žiadne polnočné eseje – len jedna

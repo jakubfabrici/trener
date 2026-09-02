@@ -201,7 +201,11 @@ class ReminderSync:
             return
 
         changes: dict = {}
-        if not item.completed:
+        if item.completed and not session_done and st.completed and not frozen:
+            # fáza už NIE je splnená (oprava nadol cez chat/tabuľku/↩️) → odčiarknutie späť
+            changes["complete"] = False
+            changes["summary"] = desired_summary
+        elif not item.completed:
             if frozen:
                 pass  # zamrazené: nechaj tak
             else:
@@ -222,9 +226,13 @@ class ReminderSync:
                 st.last_n = n
             if "due" in changes:
                 st.last_due_hhmm = local_hhmm(desired_due, self.tz)
-            if changes.get("complete"):
+            if changes.get("complete") is True:
                 st.completed = True
                 out.notes.append(f"{_sk(session)}: pripomienka odčiarknutá ✅")
+            elif changes.get("complete") is False:
+                st.completed = False
+                st.user_unticked = False
+                out.notes.append(f"{_sk(session)}: odčiarknutie zrušené (fáza už nie je splnená)")
             else:
                 out.notes.append(f"{_sk(session)}: pripomienka upravená ({', '.join(changes)})")
         self.store.save_reminder(st)

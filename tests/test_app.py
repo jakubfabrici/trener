@@ -110,9 +110,9 @@ def test_first_start_creates_table_and_reminders(h):
 def test_user_scenario_two_plus_two(h):
     h.tick_at(at(6, 0))
     r1 = h.text(at(7, 5), "2")
-    assert "ráno 2/6" in r1 and "dnes 2/12" in r1 and "🎉" not in r1
+    assert "Ráno: 2/6" in r1 and "Dnes: 2/12" in r1 and "🎉" not in r1
     r2 = h.text(at(7, 20), "ráno som dal ďalšie 2")
-    assert "ráno 4/6" in r2 and "dnes 4/12" in r2 and "zostáva 8" in r2 and "🎉" not in r2
+    assert "Ráno: 4/6" in r2 and "Dnes: 4/12" in r2 and "zostáva 8" in r2 and "🎉" not in r2
     h.tick_at(at(7, 21))
     assert h.table_rows()[D][1:3] == (4, 0)
     assert h.reminder("Ráno").summary == "💪 Ráno: 2 klikov"
@@ -178,7 +178,7 @@ def test_yesterday_report_and_wake_floor(h):
     h.tick_at(at(0, 0, 30, nd))
     h.take()
     reply = h.text(at(8, 0, 0, nd), "včera večer 12")
-    assert "včera 12/12" in reply and "dodatočne" in reply
+    assert "Včera: 12/12" in reply and "dodatočne" in reply
     assert h.store.get_day(D).done and h.store.get_day(nd).total == 0
     # wake pred 04:00 sa ignoruje, po 04:00 spustí ranné výzvy hneď
     h.clock[0] = at(3, 30, 0, nd); h.t.wake(); assert h.t.woke_date is None
@@ -268,7 +268,7 @@ def test_user_ticks_and_renames_in_reminders(h):
 
 def test_commands(h):
     h.tick_at(at(6, 0))
-    assert "cieľ 10" in asyncio.run(h.t.set_goal(10))
+    assert "cieľ: 10" in asyncio.run(h.t.set_goal(10))
     assert h.store.get_day(D).goal == 10 and h.reminder("Ráno").summary == "💪 Ráno: 5 klikov" or True
     h.tick_at(at(6, 1))
     assert h.reminder("Ráno").summary == "💪 Ráno: 5 klikov"
@@ -276,7 +276,7 @@ def test_commands(h):
     h.tick_at(at(6, 2))
     assert h.reminder("Ráno").due.astimezone(TZ).strftime("%H:%M") == "06:30"
     fix = asyncio.run(h.t.fix(EVENING, 3))
-    assert "večer 3/5" in fix
+    assert "Večer: 3/5" in fix
     st = asyncio.run(h.t.status_text())
     assert "3/10" in st and "Streak" in st
     assert "Tabuľka" in asyncio.run(h.t.table_info())
@@ -341,17 +341,17 @@ def test_stale_message_from_yesterday_ignored(h):
     reply = asyncio.run(h.t.handle_text("5", when=at(21, 0, 0, D - timedelta(days=1))))
     assert "nepočítam" in reply and h.store.get_day(D).total == 0
     reply = asyncio.run(h.t.handle_text("5", when=at(7, 0)))
-    assert "dnes 5/12" in reply
+    assert "Dnes: 5/12" in reply
 
 
 def test_delayed_same_day_message_uses_send_time_for_session(h):
     h.tick_at(at(6, 0))
     # odoslané 18:45 (ranná fáza), spracované 19:30 po reštarte → ráno, nie večer
     reply = asyncio.run(h.t.handle_text("6", when=at(18, 45)))
-    assert "ráno 6/6" in reply
+    assert "Ráno: 6/6" in reply
     h.clock[0] = at(19, 30)
     reply = asyncio.run(h.t.handle_text("3", when=at(18, 50)))
-    assert "ráno 9/6" in reply and h.store.get_day(D).evening == 0
+    assert "Ráno: 9/6" in reply and h.store.get_day(D).evening == 0
 
 
 def test_message_just_before_midnight_counts_for_yesterday(h):
@@ -359,7 +359,7 @@ def test_message_just_before_midnight_counts_for_yesterday(h):
     nd = D + timedelta(days=1)
     h.tick_at(at(0, 0, 30, nd)); h.take()
     reply = asyncio.run(h.t.handle_text("12", when=at(23, 59, 50)))   # spracované 00:00:30
-    assert "včera 12/12" in reply and h.store.get_day(D).done and h.store.get_day(nd).total == 0
+    assert "Včera: 12/12" in reply and h.store.get_day(D).done and h.store.get_day(nd).total == 0
 
 
 def test_timeout_keeps_inflight_until_thread_finishes(h):
@@ -392,3 +392,35 @@ def test_timeout_keeps_inflight_until_thread_finishes(h):
         await h.t._sync_reminders()
         assert h.t.rem_ok is True and h.t._rem_inflight is False
     asyncio.run(scenario())
+
+
+def test_undo_and_it_was_a_goal(h):
+    h.tick_at(at(6, 0))
+    reply = h.text(at(7, 5), "10")            # používateľ chcel cieľ, bot zapísal kliky
+    assert "Ráno: 10/6" in reply
+    h.tick_at(at(7, 6))
+    assert h.reminder("Ráno").completed        # ranná fáza „splnená“
+    assert h.t.undo_available() == (True, True)
+    msg = asyncio.run(h.t.undo_last(as_goal=True))
+    assert "cieľ je 10" in msg
+    day = h.store.get_day(D)
+    assert (day.goal, day.morning, day.evening) == (10, 0, 0)
+    h.tick_at(at(7, 7))
+    m = h.reminder("Ráno")
+    assert not m.completed and m.summary == "💪 Ráno: 5 klikov"     # odčiarknutie zrušené, nový cieľ
+    assert h.table_rows()[D][0] == 10 and h.table_rows()[D][1] == 0
+    assert h.t.undo_available() == (False, False)
+    # obyčajné vrátenie
+    h.text(at(7, 10), "3")
+    assert asyncio.run(h.t.undo_last()).startswith("↩️")
+    assert h.store.get_day(D).morning == 0
+    assert "Nie je čo vrátiť" in asyncio.run(h.t.undo_last())
+
+
+def test_correction_down_via_table_unticks_reminder(h):
+    h.tick_at(at(6, 0))
+    h.text(at(7, 5), "6"); h.tick_at(at(7, 6))
+    assert h.reminder("Ráno").completed
+    h.edit_table(D, Ráno=2)
+    h.tick_at(at(7, 9))
+    assert not h.reminder("Ráno").completed and h.reminder("Ráno").summary == "💪 Ráno: 4 klikov"

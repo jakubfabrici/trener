@@ -61,6 +61,7 @@ class Trainer:
         self.woke_date: date | None = None
         self.started_at = self.now()
         self._health_snapshot: dict = {"today": None, "frozen": False}
+        self.last_report: dict | None = None     # posledné hlásenie z chatu (na ↩️ Vrátiť / 🎯 Bol to cieľ)
 
     # ── pomôcky ─────────────────────────────────────────────────────────────
     def now(self) -> datetime:
@@ -448,14 +449,53 @@ class Trainer:
                          [(r.session, r.n, r.absolute) for r in pr.reports], res.day.total, res.day.goal)
                 return M.report_reply(res.day, res.added, res.completed_now, streak,
                                       next_goal(res.day, s, self.cfg.seed_goal), when="včera")
+            before = self.today_day()
             res = self._apply(pr.reports)
             if res.completed_now:
                 self.store.set_meta("announced_done_date", today.isoformat())
+            single = len(pr.reports) == 1 and not pr.reports[0].absolute and pr.reports[0].n > 0
+            self.last_report = {"date": today, "before": (before.morning, before.evening),
+                                "after": (res.day.morning, res.day.evening),
+                                "n": pr.reports[0].n if single else None}
             streak = compute_streak(self.store.all_days(), today)
             log.info("Hlásenie %s → %s/%s (ráno %s, večer %s)", [(r.session, r.n, r.absolute) for r in pr.reports],
                      res.day.total, res.day.goal, res.day.morning, res.day.evening)
             return M.report_reply(res.day, res.added, res.completed_now, streak,
                                   next_goal(res.day, s, self.cfg.seed_goal))
+
+    def undo_available(self) -> tuple[bool, bool]:
+        """(dá sa vrátiť, dá sa prehlásiť za cieľ) – pre tlačidlá pod odpoveďou."""
+        lr = self.last_report
+        if not lr or lr["date"] != self.now().date():
+            return False, False
+        return True, lr["n"] is not None
+
+    async def undo_last(self, as_goal: bool = False) -> str:
+        async with self.lock:
+            lr = self.last_report
+            today = self.now().date()
+            day = self.store.get_day(today)
+            if not lr or lr["date"] != today or day is None or (day.morning, day.evening) != tuple(lr["after"]):
+                return M.NOTHING_TO_UNDO
+            bm, be = lr["before"]
+            new = day.copy(morning=bm, evening=be)
+            if as_goal and lr["n"]:
+                new = new.copy(goal=int(lr["n"]))
+            self.store.save_day(new)
+            if not new.done:
+                self.store.set_meta("announced_done_date", None)
+            self.last_report = None
+            self.table_dirty = self.rem_dirty = True
+            self.kick()
+            log.info("Vrátené posledné hlásenie (as_goal=%s): %s → %s", as_goal, lr["after"], (bm, be))
+            if as_goal:
+                return M.UNDONE_AS_GOAL.format(n=new.goal, m=new.morning_target, e=new.evening_target)
+            return M.UNDONE + "\n" + M.report_reply(new, {}, False, compute_streak(self.store.all_days(), today),
+                                                     next_goal(new, self.settings(), self.cfg.seed_goal))
+
+    def goal_prompt(self) -> str:
+        day = self.today_day()
+        return M.GOAL_PICK.format(goal=day.goal, m=day.morning_target, e=day.evening_target)
 
     async def fix(self, session: str, n: int) -> str:
         async with self.lock:
@@ -478,8 +518,11 @@ class Trainer:
             extra = ""
             if day.done and not was_done:
                 self.store.set_meta("announced_done_date", day.date.isoformat())
-                extra = " 🎉 Tým je dnešok splnený."
-            return M.SAVED.format(what=f"dnešný cieľ {n} (ráno {day.morning_target} + večer {day.evening_target})") + extra
+                extra = "\n🎉 Tým je dnešok splnený."
+            elif not day.done and was_done:
+                self.store.set_meta("announced_done_date", None)
+            return M.GOAL_SET.format(goal=n, m=day.morning_target, e=day.evening_target,
+                                     inc=self.settings().increment) + extra
 
     async def set_increment(self, n: int) -> str:
         async with self.lock:

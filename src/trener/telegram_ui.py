@@ -19,8 +19,34 @@ log = logging.getLogger("trener.tg")
 def keyboard(frozen: bool) -> InlineKeyboardMarkup:
     first = InlineKeyboardButton("▶️ Odmraziť", callback_data="unfreeze") if frozen \
         else InlineKeyboardButton("❄️ Zmraziť", callback_data="freeze")
-    return InlineKeyboardMarkup([[first, InlineKeyboardButton("🔄 Sync", callback_data="sync")],
-                                 [InlineKeyboardButton("📊 Stav", callback_data="status")]])
+    return InlineKeyboardMarkup([[first, InlineKeyboardButton("🎯 Cieľ", callback_data="goalpick")],
+                                 [InlineKeyboardButton("🔄 Sync", callback_data="sync"),
+                                  InlineKeyboardButton("📊 Stav", callback_data="status")]])
+
+
+def report_keyboard(can_undo: bool, can_goal: bool) -> InlineKeyboardMarkup | None:
+    row = []
+    if can_undo:
+        row.append(InlineKeyboardButton("↩️ Vrátiť", callback_data="undo"))
+    if can_goal:
+        row.append(InlineKeyboardButton("🎯 Bol to cieľ, nie kliky", callback_data="asgoal"))
+    return InlineKeyboardMarkup([row]) if row else None
+
+
+GOAL_PRESETS = (6, 8, 10, 12, 14, 16, 20, 25, 30, 40)
+
+
+def goal_keyboard(current: int) -> InlineKeyboardMarkup:
+    vals = sorted(set(GOAL_PRESETS) | {max(current - 2, 1), current, current + 2})
+    rows, row = [], []
+    for v in vals:
+        row.append(InlineKeyboardButton(f"{'✅ ' if v == current else ''}{v}", callback_data=f"goal:{v}"))
+        if len(row) == 5:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("📊 Stav", callback_data="status")])
+    return InlineKeyboardMarkup(rows)
 
 
 def register(app: Application, trainer, owner_chat_id: int) -> None:
@@ -46,11 +72,15 @@ def register(app: Application, trainer, owner_chat_id: int) -> None:
         await update.message.reply_text(await trainer.set_frozen(False), reply_markup=keyboard(False))
 
     async def ciel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not ctx.args:
+            day = trainer.today_day()
+            await update.message.reply_text(trainer.goal_prompt(), reply_markup=goal_keyboard(day.goal))
+            return
         n = _int_arg(ctx)
         if n is None:
             await update.message.reply_text(M.BAD_INT.format(cmd="ciel"))
             return
-        await update.message.reply_text(await trainer.set_goal(n))
+        await update.message.reply_text(await trainer.set_goal(n), reply_markup=keyboard(trainer.settings().frozen))
 
     async def prirastok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         n = _int_arg(ctx)
@@ -103,7 +133,9 @@ def register(app: Application, trainer, owner_chat_id: int) -> None:
         text = update.message.text or ""
         log.info("Správa: %r", text)
         reply = await trainer.handle_text(text, update.message.date)
-        await update.message.reply_text(reply)
+        can_undo, can_goal = trainer.undo_available()
+        await update.message.reply_text(reply, reply_markup=report_keyboard(can_undo, can_goal)
+                                        if reply.startswith("✅") else None)
 
     async def on_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         q = update.callback_query
@@ -113,22 +145,34 @@ def register(app: Application, trainer, owner_chat_id: int) -> None:
             await q.answer()
             return
         data = q.data or ""
+        markup = None
         if data == "freeze":
             text = await trainer.set_frozen(True)
         elif data == "unfreeze":
             text = await trainer.set_frozen(False)
         elif data == "sync":
             text = await trainer.force_sync()
+        elif data == "undo":
+            text = await trainer.undo_last(as_goal=False)
+        elif data == "asgoal":
+            text = await trainer.undo_last(as_goal=True)
+        elif data == "goalpick":
+            text = trainer.goal_prompt()
+            markup = goal_keyboard(trainer.today_day().goal)
+        elif data.startswith("goal:") and data[5:].isdigit():
+            text = await trainer.set_goal(int(data[5:]))
         else:
             text = await trainer.status_text()
+        if markup is None:
+            markup = keyboard(trainer.settings().frozen)
         await q.answer()
         try:
-            await q.edit_message_text(text, reply_markup=keyboard(trainer.settings().frozen))
+            await q.edit_message_text(text, reply_markup=markup)
         except BadRequest as e:
             if "not modified" in str(e).lower():
                 return                      # rovnaký text – nič netreba
             if q.message is not None:
-                await q.message.reply_text(text, reply_markup=keyboard(trainer.settings().frozen))
+                await q.message.reply_text(text, reply_markup=markup)
 
     async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         err = ctx.error
@@ -168,7 +212,7 @@ BOT_COMMANDS = [
     ("stav", "dnešok, streak, tabuľka, pripomienky"),
     ("zmraz", "pauza – nič nepripomínať"),
     ("odmraz", "pokračovať"),
-    ("ciel", "dnešný cieľ, napr. /ciel 12"),
+    ("ciel", "dnešný cieľ – tlačidlá alebo /ciel 10"),
     ("prirastok", "rast cieľa po splnenom dni"),
     ("rano", "ranný čas HH:MM"),
     ("vecer", "večerný čas HH:MM"),

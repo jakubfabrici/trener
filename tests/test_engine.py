@@ -177,7 +177,7 @@ def test_plan_at_most_one_action():
 def test_report_reply_text():
     day = Day(D, 10, morning=4)
     txt = M.report_reply(day, {MORNING: 2, EVENING: 0}, False, 1, 12)
-    assert "+2 ráno" in txt and "ráno 4/5" in txt and "dnes 4/10" in txt and "zostáva 6" in txt
+    assert "+2 ráno" in txt and "Ráno: 4/5" in txt and "Dnes: 4/10" in txt and "zostáva 6" in txt
     done = M.report_reply(Day(D, 10, 5, 5), {MORNING: 0, EVENING: 5}, True, 3, 12)
     assert "🎉" in done and "Streak 3" in done and "12" in done
 
