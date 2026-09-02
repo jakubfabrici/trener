@@ -36,8 +36,8 @@ if [ ! -f "$RAD_CFG/users" ]; then
   : "${RADICALE_PASSWORD:=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)}"
   HASH=$("$RAD_DIR/.venv/bin/python" -c "import bcrypt,sys;print(bcrypt.hashpw(sys.argv[1].encode(),bcrypt.gensalt()).decode())" "$RADICALE_PASSWORD")
   echo "$RADICALE_USER:$HASH" > "$RAD_CFG/users"
-  echo "   Radicale používateľ: $RADICALE_USER  heslo: $RADICALE_PASSWORD  (zapíš si ho – je aj v $CFG_DIR/trener.env)"
-  echo "$RADICALE_PASSWORD" > "$RAD_CFG/.password-initial"; chmod 600 "$RAD_CFG/.password-initial"
+  echo "   Radicale používateľ: $RADICALE_USER (heslo je v $CFG_DIR/trener.env ako CALDAV_PASSWORD – nelogujeme ho)"
+  (umask 077; echo "$RADICALE_PASSWORD" > "$RAD_CFG/.password-initial")
 fi
 chown -R radicale:radicale /var/lib/radicale
 chown root:radicale "$RAD_CFG/users" "$RAD_CFG/config"; chmod 640 "$RAD_CFG/users" "$RAD_CFG/config"
@@ -47,6 +47,7 @@ if [ ! -f "$CFG_DIR/trener.env" ]; then
   cp "$APP_DIR/deploy/trener.env.example" "$CFG_DIR/trener.env"
   if [ -f "$RAD_CFG/.password-initial" ]; then
     sed -i "s|^CALDAV_PASSWORD=.*|CALDAV_PASSWORD=$(cat "$RAD_CFG/.password-initial")|" "$CFG_DIR/trener.env"
+    rm -f "$RAD_CFG/.password-initial"
   fi
   sed -i "s|^WAKE_WEBHOOK_TOKEN=.*|WAKE_WEBHOOK_TOKEN=$(openssl rand -hex 24)|" "$CFG_DIR/trener.env"
   echo "   vytvorený $CFG_DIR/trener.env – DOPLŇ BOT_TOKEN, OWNER_CHAT_ID, SMB_PASSWORD"

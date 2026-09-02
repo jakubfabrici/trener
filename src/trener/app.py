@@ -60,6 +60,7 @@ class Trainer:
         self._table_failed_this_tick = False
         self.woke_date: date | None = None
         self.started_at = self.now()
+        self._health_snapshot: dict = {"today": None, "frozen": False}
 
     # ── pomôcky ─────────────────────────────────────────────────────────────
     def now(self) -> datetime:
@@ -96,15 +97,22 @@ class Trainer:
         self.kick()
 
     def health(self) -> dict:
+        """Volá sa z vlákna web servera – žiadny prístup do SQLite (spojenie patrí event loopu),
+        len snímka, ktorú tick priebežne obnovuje."""
+        snap = dict(self._health_snapshot)
+        snap.update({"ok": True, "time": self.now().isoformat(), "started": self.started_at.isoformat(),
+                     "table": {"ok": self.table_ok, "busy": self.table_busy, "last_sync": self.last_table_sync,
+                               "url": self.cfg.table_url, "warnings": self.table_warnings[:5]},
+                     "reminders": {"enabled": self.rem is not None, "ok": self.rem_ok,
+                                   "last_sync": self.last_rem_sync}})
+        return snap
+
+    def _refresh_health_snapshot(self) -> None:
         d = self.store.get_day(self.now().date())
-        return {
-            "ok": True, "time": self.now().isoformat(), "started": self.started_at.isoformat(),
+        self._health_snapshot = {
             "today": None if d is None else {"date": d.date.isoformat(), "goal": d.goal,
                                              "morning": d.morning, "evening": d.evening, "done": d.done},
             "frozen": self.settings().frozen,
-            "table": {"ok": self.table_ok, "busy": self.table_busy, "last_sync": self.last_table_sync,
-                      "url": self.cfg.table_url, "warnings": self.table_warnings[:5]},
-            "reminders": {"enabled": self.rem is not None, "ok": self.rem_ok, "last_sync": self.last_rem_sync},
         }
 
     # ── štart ───────────────────────────────────────────────────────────────
@@ -118,6 +126,7 @@ class Trainer:
         if self.store.get_meta("current_date") is None:
             self.store.set_meta("current_date", today.isoformat())
         self.today_day()
+        self._refresh_health_snapshot()
 
     # ── hlavná slučka ───────────────────────────────────────────────────────
     async def run_loop(self) -> None:
@@ -149,6 +158,7 @@ class Trainer:
                 await self._sync_table()
             await self._check_completion("tabuľka/Pripomienky")
             await self._nags(now)
+            self._refresh_health_snapshot()
 
     def _table_wanted(self, now: datetime) -> bool:
         if self.table_retry_at is not None and now < self.table_retry_at:
