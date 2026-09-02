@@ -94,7 +94,10 @@ pct exec 122 -- journalctl -u trener -f
 Aktualizácia kódu: znova `bootstrap-lxc.sh` (kopíruje zdroje a reinštaluje, konfig nechá).
 Presmerovanie NPM po zmene IP: `NEW_IP=192.168.1.254 bash deploy/npm-repoint.sh` v LXC 104.
 
-Kontrola: `curl -s http://192.168.1.254:8790/health` (stav tabuľky, pripomienok, dneška).
+Kontrola: `curl -s http://192.168.1.254:8790/health` (stav tabuľky, pripomienok, dneška). Cez
+internet (`https://kliky.fabrici.xyz/health`) sa vracia len `{"ok": true}` – detaily vidí iba LAN.
+Správy z Telegramu doručené dodatočne po výpadku (z iného dňa) bot nepočíta – odpovie, ako ich
+doplniť („včera 5“ alebo tabuľka).
 
 ## Prevádzka
 
