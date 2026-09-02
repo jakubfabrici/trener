@@ -73,6 +73,7 @@ class Harness:
             self.t.rem = None
             self.t.todos = None
         else:
+            self.t.make_reminders = False
             self.t.todos = self.todos
             self.t.rem = ReminderSync(self.todos, self.store, TZ)
         self.t.now = lambda: self.clock[0]
@@ -565,3 +566,53 @@ def test_shortcut_ignores_foreign_and_old_notes(hs):
         hs.t.shortcut_report(bad)
     hs.tick_at(at(6, 5))
     assert hs.store.get_day(D).total == 0 and hs.take() == []
+
+
+# ── API pre mobilnú appku „Kliky" ───────────────────────────────────────────
+
+def test_app_api_status_and_reporting(h):
+    h.tick_at(at(6, 0))
+    st = h.t.shortcut_plan()["stav"]
+    assert st["ciel"] == 12 and st["rano_ciel"] == 6 and st["vecer_ciel"] == 6
+    assert st["rano_cas"] == "07:00" and st["vecer_cas"] == "19:20"
+    assert st["rano_due"].endswith("07:00:00+02:00") and st["vecer_due"].endswith("19:20:00+02:00")
+    assert st["rano_nazov"] == "💪 Ráno: 6 klikov" and st["poznamka_rano"] == "kliky:2026-09-02:morning"
+    assert st["zamrazene"] is False and st["splneny"] is False and st["zostava"] == 12
+
+    # appka hlási kliky
+    assert h.t.shortcut_report({"kind": "reps", "poznamka": st["poznamka_rano"], "n": "4"}) == {"ok": True}
+    h.tick_at(at(7, 30))
+    assert h.store.get_day(D).morning == 4
+    assert h.t.shortcut_plan()["stav"]["zostava"] == 8
+    assert h.table_rows()[D][1] == 4                     # zapísané aj do tabuľky
+
+    # oprava na presnú hodnotu
+    h.t.shortcut_report({"kind": "reps", "poznamka": st["poznamka_rano"], "n": "6", "absolute": True})
+    h.tick_at(at(7, 35))
+    assert h.store.get_day(D).morning == 6 and h.t.shortcut_plan()["stav"]["rano_hotovo"] is True
+
+
+def test_app_api_freeze_roundtrip(h):
+    h.tick_at(at(6, 0))
+    h.t.shortcut_report({"kind": "freeze", "hodnota": "1"})
+    h.tick_at(at(6, 2))
+    assert h.t.settings().frozen and h.t.shortcut_plan()["stav"]["zamrazene"] is True
+    assert any("Zamrazené" in m for m in h.take())
+    h.tick_at(at(7, 0))
+    assert h.take() == []                                 # zamrazené: žiadne výzvy
+    h.t.shortcut_report({"kind": "freeze", "hodnota": "0"})
+    h.tick_at(at(7, 2))
+    assert not h.t.settings().frozen and any("Odmrazené" in m for m in h.take())
+
+
+def test_app_api_completing_the_day(h):
+    h.tick_at(at(6, 0))
+    st = h.t.shortcut_plan()["stav"]
+    h.t.shortcut_report({"kind": "reps", "poznamka": st["poznamka_rano"], "n": "6"})
+    h.t.shortcut_report({"kind": "reps", "poznamka": st["poznamka_vecer"], "n": "6"})
+    h.tick_at(at(20, 0))
+    day = h.store.get_day(D)
+    assert (day.morning, day.evening) == (6, 6) and day.done
+    assert any("🎉" in m for m in h.take())
+    st = h.t.shortcut_plan()["stav"]
+    assert st["splneny"] and st["streak"] == 1 and st["zajtra_ciel"] == 14

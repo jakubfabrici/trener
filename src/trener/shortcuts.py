@@ -45,6 +45,29 @@ def due_at(d: date, hhmm: str, tz: ZoneInfo) -> datetime:
     return datetime.combine(d, hhmm_to_time(hhmm), tzinfo=tz)
 
 
+def app_status(day: Day, settings: Settings, streak: int, next_goal_value: int, tz) -> dict:
+    """Kompletný stav pre mobilnú appku (jedno volanie = všetko, čo potrebuje)."""
+    return {
+        "datum": day.date.isoformat(),
+        "ciel": day.goal,
+        "rano": day.morning, "vecer": day.evening, "spolu": day.total, "zostava": day.left,
+        "rano_ciel": day.morning_target, "vecer_ciel": day.evening_target,
+        "rano_hotovo": day.session_done(MORNING), "vecer_hotovo": day.session_done(EVENING),
+        "splneny": day.done,
+        "zamrazene": bool(settings.frozen or day.frozen),
+        "streak": streak,
+        "zajtra_ciel": next_goal_value,
+        "rano_cas": settings.morning_time,
+        "vecer_cas": settings.evening_time,
+        "rano_nazov": render_title(settings.title_template(MORNING), session_number(day, MORNING)),
+        "vecer_nazov": render_title(settings.title_template(EVENING), session_number(day, EVENING)),
+        "rano_due": due_at(day.date, settings.morning_time, tz).isoformat(timespec="seconds"),
+        "vecer_due": due_at(day.date, settings.evening_time, tz).isoformat(timespec="seconds"),
+        "poznamka_rano": make_note(day.date, MORNING),
+        "poznamka_vecer": make_note(day.date, EVENING),
+    }
+
+
 @dataclass
 class Outcome:
     settings: Settings
@@ -113,7 +136,19 @@ class ShortcutBridge:
                 out.notes.append(f"pripomienka z {d} sa netýka dneška – ignorujem")
                 continue
             st = self.store.get_reminder(d, session) or ReminderState(d, session)
-            if kind == "done":
+            if kind == "reps":
+                try:
+                    n = int(p.get("n") or 0)
+                except (TypeError, ValueError):
+                    n = 0
+                if n == 0:
+                    out.notes.append("hlásenie bez počtu – ignorujem")
+                    continue
+                rep = Report(session, n, absolute=bool(p.get("absolute")))
+                out.reports.append(rep)
+                day = apply_reports(day, [rep]).day
+                out.notes.append(f"{_sk(session)}: {'nastavené na' if p.get('absolute') else '+'}{n} z appky")
+            elif kind == "done":
                 if st.completed or day.session_done(session):
                     continue                      # už je zarátané, žiadne dvojité pripísanie
                 n = (max(day.morning, day.morning_target) if session == MORNING

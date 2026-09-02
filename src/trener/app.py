@@ -29,7 +29,7 @@ from trener.engine import (WAKE_FLOOR, Snapshot, apply_reports, compute_streak, 
 from trener.model import EVENING, MORNING, Day, Report, Settings
 from trener.parsing import parse_message
 from trener.reminders import ReminderSync
-from trener.shortcuts import ShortcutBridge
+from trener.shortcuts import ShortcutBridge, app_status
 from trener.smb_io import Busy, Conflict, make_backend
 from trener.store import Store
 from trener.table import TableCorrupt, merge, parse_workbook, render_workbook
@@ -45,9 +45,10 @@ class Trainer:
         self.cfg, self.store, self.backend, self.todos, self.send = cfg, store, backend, todos, send
         self.tz = cfg.tz
         self.rem = ReminderSync(todos, store, cfg.tz) if todos else None
-        # iCloud Pripomienky cez iOS Skratku (bot do iCloudu zapisovať nevie – robí to telefón)
-        self.bridge = ShortcutBridge(store, cfg.tz, cfg.reminders_list) \
-            if cfg.reminders_mode == "shortcuts" else None
+        # API pre telefón: mobilná appka „Kliky“ (a prípadne iOS Skratka). Pripomienky
+        # v iCloude vie vytvárať iba zariadenie, preto mu bot podáva plán a prijíma hlásenia.
+        self.bridge = ShortcutBridge(store, cfg.tz, cfg.reminders_list)
+        self.make_reminders = cfg.reminders_mode == "shortcuts"
         self.calendar = calendar
         self.cal_sync = CalendarSync(calendar, store, cfg.tz, cfg.calendar_minutes,
                                      cfg.calendar_alarms) if calendar else None
@@ -128,7 +129,7 @@ class Trainer:
                      "calendar": {"mode": self.cfg.calendar_mode, "name": self.cfg.calendar_name,
                                   "ok": self.cal_ok, "last_sync": self.last_cal_sync},
                      "reminders": {"mode": self.cfg.reminders_mode,
-                                   "enabled": self.rem is not None or self.bridge is not None,
+                                   "enabled": self.rem is not None or self.make_reminders,
                                    "ok": self.rem_ok, "last_sync": self.last_rem_sync,
                                    "last_shortcut": self.last_shortcut_at}})
         return snap
@@ -147,14 +148,24 @@ class Trainer:
         return {"ok": True}
 
     async def _drain_inbox(self) -> None:
-        if self.bridge is None:
-            return
         items = []
         while True:
             try:
                 items.append(self.inbox.get_nowait())
             except queue.Empty:
                 break
+        if not items:
+            return
+        for p in [x for x in items if x.get("kind") == "freeze"]:
+            want = str(p.get("hodnota", "")).lower() not in ("0", "false", "nie", "off")
+            if self.settings().frozen != want:
+                self._save_settings(self.settings().copy(frozen=want))
+                self._apply_frozen_to_today(want)
+                log.info("Zamrazenie z appky: %s", want)
+                await self.send(M.FROZEN_ON if want else
+                                M.FROZEN_OFF.format(total=self.today_day().total,
+                                                    goal=self.today_day().goal))
+        items = [x for x in items if x.get("kind") != "freeze"]
         if not items:
             return
         day = self.today_day()
@@ -175,11 +186,15 @@ class Trainer:
                     next_goal(res.day, out.settings, self.cfg.seed_goal)).split("\n", 1)[1])
 
     def _refresh_shortcut_snapshot(self) -> None:
-        if self.bridge is None:
-            return
         day = self.store.get_day(self.now().date())
-        if day is not None:
-            self._plan_snapshot = self.bridge.plan(day, self.settings())
+        if day is None:
+            return
+        s = self.settings()
+        plan = self.bridge.plan(day, s) if self.make_reminders else {"pripomienky": [], "pocet": 0}
+        plan["stav"] = app_status(day, s, compute_streak(self.store.all_days(), day.date),
+                                  next_goal(day, s, self.cfg.seed_goal), self.tz)
+        plan["pripomienky_zapnute"] = self.make_reminders
+        self._plan_snapshot = plan
 
     def _refresh_health_snapshot(self) -> None:
         d = self.store.get_day(self.now().date())
@@ -844,9 +859,8 @@ async def post_init(application: Application) -> None:
             cfg.web_port, cfg.wake_token,
             on_wake=lambda: loop.call_soon_threadsafe(trainer.wake),
             health=trainer.health,
-            shortcut_token=cfg.shortcut_token if trainer.bridge else None,
-            plan=trainer.shortcut_plan if trainer.bridge else None,
-            report=trainer.shortcut_report if trainer.bridge else None)
+            shortcut_token=cfg.shortcut_token,
+            plan=trainer.shortcut_plan, report=trainer.shortcut_report)
     except OSError as e:
         log.error("Web server na porte %d sa nespustil: %s", cfg.web_port, e)
     # vlastný task (nie application.create_task – ten by Application.stop() čakal donekonečna)

@@ -52,21 +52,28 @@ def start_web_server(port: int, token: str | None, on_wake, health, shortcut_tok
 
         def do_GET(self):  # noqa: N802
             u = urlparse(self.path)
-            if u.path in ("/plan", "/hotovo", "/uprav", "/zmazane"):
+            if u.path in ("/plan", "/hotovo", "/uprav", "/zmazane", "/stav", "/kliky", "/zmraz"):
                 q = parse_qs(u.query)
                 if not self._shortcut_ok(q):
                     self._plain(403, "Forbidden")
                     return
-                if u.path == "/plan":
-                    _json(self, 200, plan() if plan else {"chyba": "vypnuté"})
+                if u.path in ("/plan", "/stav"):
+                    if plan is None:
+                        _json(self, 200, {"chyba": "vypnuté"})
+                        return
+                    data = plan()
+                    _json(self, 200, data.get("stav", data) if u.path == "/stav" else data)
                     return
                 if report is None:
                     _json(self, 200, {"ok": False, "chyba": "vypnuté"})
                     return
-                kind = {"/hotovo": "done", "/uprav": "edit", "/zmazane": "deleted"}[u.path]
+                kind = {"/hotovo": "done", "/uprav": "edit", "/zmazane": "deleted",
+                        "/kliky": "reps", "/zmraz": "freeze"}[u.path]
                 one = lambda k: q.get(k, [""])[0]  # noqa: E731
                 _json(self, 200, report({"kind": kind, "poznamka": one("poznamka"),
-                                         "nazov": one("nazov"), "cas": one("cas")}))
+                                         "nazov": one("nazov"), "cas": one("cas"),
+                                         "n": one("n"), "absolute": one("absolute") in ("1", "true", "ano"),
+                                         "faza": one("faza"), "hodnota": one("hodnota")}))
                 return
             if u.path == "/health":
                 data = health() if _client_is_local(self) else {"ok": True}   # z internetu len „žijem“
