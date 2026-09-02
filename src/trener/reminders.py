@@ -21,6 +21,7 @@ from datetime import date, datetime, time as dtime
 from zoneinfo import ZoneInfo
 
 from trener.caldav_todo import CalDavError, Conflict, TodoItem, TodoList, apply_changes, build_todo_ics
+from trener.engine import apply_reports
 from trener.model import EVENING, MORNING, SESSIONS, Day, ReminderState, Report, Settings, hhmm_to_time
 
 log = logging.getLogger("trener.reminders")
@@ -31,13 +32,15 @@ def render_title(template: str, n: int) -> str:
 
 
 def learn_template(new_summary: str, last_n: int) -> str:
-    """Z názvu upraveného používateľom odvodí šablónu: číslo → {n}."""
+    """Z názvu upraveného používateľom odvodí šablónu: číslo → {n} (celé číslo, nie podreťazec)."""
     s = new_summary.strip()
-    if last_n > 0 and str(last_n) in s:
-        return s.replace(str(last_n), "{n}", 1)
+    if "{n}" in s:
+        return s
+    if last_n > 0 and re.search(rf"(?<!\d){last_n}(?!\d)", s):
+        return re.sub(rf"(?<!\d){last_n}(?!\d)", "{n}", s, count=1)
     nums = re.findall(r"\d+", s)
     if len(nums) == 1:
-        return s.replace(nums[0], "{n}", 1)
+        return re.sub(rf"(?<!\d){nums[0]}(?!\d)", "{n}", s, count=1)
     return s     # bez čísla → pevný text
 
 
@@ -80,7 +83,7 @@ class ReminderSync:
         self._allow_create = allow_create
         try:
             items = self.todos.list()
-        except (CalDavError, OSError) as e:
+        except Exception as e:  # noqa: BLE001 – CalDAV je best-effort, tick musí bežať ďalej
             out.errors.append(f"CalDAV nedostupný: {e}")
             return out
         by_uid = {i.uid: i for i in items if i.uid}
@@ -93,19 +96,23 @@ class ReminderSync:
                 try:
                     self.todos.delete(item)
                     out.notes.append(f"zmazaná stará pripomienka {st.date} {st.session}")
-                except (CalDavError, OSError) as e:
+                except Exception as e:  # noqa: BLE001
                     out.errors.append(f"mazanie {st.uid}: {e}")
                     continue
             self.store.delete_reminder(st.date, st.session)
 
-        # 2) dnešné pripomienky
+        # 2) dnešné pripomienky – po každej fáze premietni prípadné odškrtnutie do `today`,
+        #    aby druhá fáza nerátala zo zastaraného stavu (obe odškrtnuté naraz = presne cieľ)
         for session in SESSIONS:
+            before = len(out.reports)
             try:
                 self._sync_session(today, session, out, by_uid, by_href)
             except Conflict:
                 out.notes.append(f"{session}: pripomienku práve menil telefón – skúsim o chvíľu")
-            except (CalDavError, OSError) as e:
+            except Exception as e:  # noqa: BLE001
                 out.errors.append(f"{session}: {e}")
+            if len(out.reports) > before:
+                today = apply_reports(today, out.reports[before:]).day
         return out
 
     def _sync_session(self, today: Day, session: str, out: SyncOutcome,
@@ -115,6 +122,18 @@ class ReminderSync:
         item = None
         if st.uid:
             item = by_uid.get(st.uid) or by_href.get(st.href)
+        elif not st.user_deleted:
+            # o pripomienke nič nevieme (nová DB / pád medzi create a uložením) – ak už na serveri
+            # dnešná pripomienka tejto fázy je, prevezmeme ju namiesto vytvárania duplikátu
+            prefix = f"kliky-{today.date.isoformat()}-{session}-"
+            for uid, it in by_uid.items():
+                if uid.startswith(prefix):
+                    item = it
+                    st = ReminderState(today.date, session, it.href, uid, it.etag, it.summary,
+                                       local_hhmm(it.due, self.tz) if it.due else "", it.completed, False, 0,
+                                       session_number(today, session), False)
+                    out.notes.append(f"{_sk(session)}: prevzatá existujúca pripomienka {uid}")
+                    break
 
         # ── čo spravil používateľ od posledného syncu ─────────────────────
         if st.uid and item is None:
@@ -186,8 +205,8 @@ class ReminderSync:
             if frozen:
                 pass  # zamrazené: nechaj tak
             else:
-                if desired_summary != item.summary:
-                    changes["summary"] = desired_summary
+                if desired_summary != item.summary and not session_done:
+                    changes["summary"] = desired_summary   # po splnení názov nechávame („0 klikov“ nechceme)
                 cur_hhmm = local_hhmm(item.due, self.tz) if item.due else ""
                 if cur_hhmm != local_hhmm(desired_due, self.tz) or (
                         item.due and item.due.astimezone(self.tz).date() != today.date):

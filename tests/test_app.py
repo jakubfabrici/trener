@@ -292,3 +292,18 @@ def test_table_corrupt_is_not_overwritten(h):
     for i in range(5):
         h.tick_at(at(6, 5 + 2 * i))
     assert any("nedostupná" in m for m in h.take())
+
+
+def test_reminder_backend_down_does_not_block_nags(h):
+    h.tick_at(at(6, 0))
+    original = h.todos.list
+
+    def boom():
+        raise RuntimeError("radicale down")
+    h.todos.list = boom
+    h.tick_at(at(7, 0))
+    assert [m.startswith("☀️") for m in h.take()] == [True]
+    assert h.t.rem_ok is False
+    h.todos.list = original
+    h.tick_at(at(7, 2))
+    assert h.t.rem_ok is True

@@ -80,7 +80,8 @@ def _alarm(due: datetime):
     a = Alarm()
     a.add("ACTION", "DISPLAY")
     a.add("DESCRIPTION", "Reminder")
-    a.add("TRIGGER", due.astimezone(timezone.utc))   # VALUE=DATE-TIME – absolútny čas
+    # absolútny čas: parameter VALUE=DATE-TIME je povinný (default je DURATION) – Apple ho píše tiež
+    a.add("TRIGGER", vDatetime(due.astimezone(timezone.utc)), parameters={"VALUE": "DATE-TIME"})
     a.add("X-WR-ALARMUID", str(uuid.uuid4()).upper())
     a.add("UID", str(uuid.uuid4()).upper())
     return a
@@ -133,7 +134,7 @@ def apply_changes(item: TodoItem, *, summary: str | None = None, due: datetime |
             trig = a.get("TRIGGER")
             if trig is not None and isinstance(getattr(trig, "dt", None), datetime):
                 del a["TRIGGER"]
-                a.add("TRIGGER", due.astimezone(timezone.utc))
+                a.add("TRIGGER", vDatetime(due.astimezone(timezone.utc)), parameters={"VALUE": "DATE-TIME"})
     if complete is True:
         _set("STATUS", "COMPLETED")
         _set("COMPLETED", now)
@@ -171,8 +172,16 @@ class TodoList:
         self.client.close()
 
     # ── HTTP pomôcky ────────────────────────────────────────────────────────
+    def _call(self, method: str, url: str, **kw) -> httpx.Response:
+        """Každý HTTP hovor cez toto: sieťové chyby httpx nie sú OSError, preto ich
+        prekladáme na CalDavError, aby ich volajúci vedel bezpečne odchytiť."""
+        try:
+            return self.client.request(method, url, **kw)
+        except httpx.HTTPError as e:
+            raise CalDavError(f"{method} {url}: {type(e).__name__}: {e}") from e
+
     def _req(self, method: str, url: str, **kw) -> httpx.Response:
-        r = self.client.request(method, url, **kw)
+        r = self._call(method, url, **kw)
         if r.status_code == 412:
             raise Conflict(f"{method} {url}: 412 Precondition Failed")
         if r.status_code >= 400 and r.status_code not in (404,):
@@ -216,7 +225,10 @@ class TodoList:
                 '<D:prop><D:displayname/><D:resourcetype/><C:supported-calendar-component-set/></D:prop>'
                 '</D:propfind>')
         r = self._req("PROPFIND", home, content=body, headers={"Depth": "1"})
-        root = ET.fromstring(r.text)
+        try:
+            root = ET.fromstring(r.text)
+        except ET.ParseError as e:
+            raise CalDavError(f"PROPFIND {home}: neplatná odpoveď: {e}") from e
         fallback = None
         for resp in root.findall("D:response", NS):
             href = resp.find("D:href", NS)
@@ -243,8 +255,8 @@ class TodoList:
                     f'<D:displayname>{self.list_name}</D:displayname>'
                     '<C:supported-calendar-component-set><C:comp name="VTODO"/></C:supported-calendar-component-set>'
                     '</D:prop></D:set></C:mkcalendar>')
-            r = self.client.request("MKCALENDAR", url, content=body,
-                                    headers={"Content-Type": "application/xml; charset=utf-8"})
+            r = self._call("MKCALENDAR", url, content=body,
+                           headers={"Content-Type": "application/xml; charset=utf-8"})
             if r.status_code not in (200, 201):
                 raise CalDavError(f"MKCALENDAR zlyhal: HTTP {r.status_code} {r.text[:200]}")
             log.info("CalDAV: vytvorený zoznam '%s' (%s)", self.list_name, url)
@@ -264,8 +276,14 @@ class TodoList:
                 '</C:calendar-query>')
         r = self._req("REPORT", col, content=body,
                       headers={"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
+        if r.status_code == 404:
+            self.collection_url = None       # zoznam zmizol (zmazaný v telefóne) → nabudúce nájdeme/vytvoríme
+            raise CalDavError(f"zoznam '{self.list_name}' na serveri neexistuje (404) – obnovím ho")
         out: list[TodoItem] = []
-        root = ET.fromstring(r.text)
+        try:
+            root = ET.fromstring(r.text)
+        except ET.ParseError as e:
+            raise CalDavError(f"REPORT {col}: neplatná odpoveď: {e}") from e
         for resp in root.findall("D:response", NS):
             href = resp.find("D:href", NS)
             etag = resp.find(".//D:getetag", NS)
@@ -278,7 +296,7 @@ class TodoList:
         return out
 
     def get(self, href: str) -> TodoItem | None:
-        r = self.client.get(href)
+        r = self._call("GET", href)
         if r.status_code == 404:
             return None
         if r.status_code >= 400:
@@ -288,8 +306,8 @@ class TodoList:
     def create(self, uid: str, ics: bytes) -> TodoItem:
         col = self.ensure_collection()
         href = urljoin(col, quote(uid) + ".ics")
-        r = self.client.put(href, content=ics, headers={"Content-Type": "text/calendar; charset=utf-8",
-                                                          "If-None-Match": "*"})
+        r = self._call("PUT", href, content=ics, headers={"Content-Type": "text/calendar; charset=utf-8",
+                                                         "If-None-Match": "*"})
         if r.status_code == 412:
             raise Conflict(f"PUT {href}: už existuje")
         if r.status_code not in (200, 201, 204):
@@ -307,7 +325,7 @@ class TodoList:
         headers = {"Content-Type": "text/calendar; charset=utf-8"}
         if item.etag:
             headers["If-Match"] = item.etag
-        r = self.client.put(item.href, content=ics, headers=headers)
+        r = self._call("PUT", item.href, content=ics, headers=headers)
         if r.status_code == 412:
             raise Conflict(f"PUT {item.href}: 412 (zmenené na serveri)")
         if r.status_code not in (200, 201, 204):
@@ -323,7 +341,7 @@ class TodoList:
 
     def delete(self, item: TodoItem) -> None:
         headers = {"If-Match": item.etag} if item.etag else {}
-        r = self.client.delete(item.href, headers=headers)
+        r = self._call("DELETE", item.href, headers=headers)
         if r.status_code == 412:
             raise Conflict(f"DELETE {item.href}: 412")
         if r.status_code not in (200, 202, 204, 404):

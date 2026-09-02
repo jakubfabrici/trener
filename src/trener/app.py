@@ -264,7 +264,13 @@ class Trainer:
             return
         today = day if day is not None else self.today_day()
         settings = self.settings()
-        out = await asyncio.to_thread(self.rem.sync, today, settings, allow_create)
+        try:
+            out = await asyncio.to_thread(self.rem.sync, today, settings, allow_create)
+        except Exception as e:  # noqa: BLE001 – pripomienky nesmú zhodiť tick (výzvy, oznámenia)
+            if self.rem_ok is not False:
+                log.warning("Pripomienky: neočakávaná chyba: %s", e, exc_info=True)
+            self.rem_ok = False
+            return
         for n in out.notes:
             log.info("Pripomienky: %s", n)
         if out.errors:

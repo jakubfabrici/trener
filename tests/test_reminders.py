@@ -172,6 +172,9 @@ def test_learn_template_and_numbers():
     assert learn_template("Kliky ráno 5!", 5) == "Kliky ráno {n}!"
     assert learn_template("Padaj na zem", 5) == "Padaj na zem"
     assert learn_template("2x denne 7 klikov", 7) == "2x denne {n} klikov"
+    assert learn_template("Kliky 10 ráno", 1) == "Kliky {n} ráno"        # nie „{n}0“
+    assert learn_template("Kliky 1 ráno (10 sérií)", 1) == "Kliky {n} ráno (10 sérií)"
+    assert learn_template("Ráno {n} klikov", 3) == "Ráno {n} klikov"
     assert session_number(Day(D, 10), EVENING) == 5
     assert session_number(Day(D, 10, morning=2), EVENING) == 8
     assert session_number(Day(D, 10, morning=2), MORNING) == 3
@@ -196,3 +199,64 @@ def test_apple_style_vtodo_round_trip_keeps_x_props():
     assert b"PERCENT-COMPLETE:100" in out and b"COMPLETED:" in out
     item2 = parse_item("h", "e", out)
     assert item2.completed
+
+
+def test_both_ticked_in_one_sync_gives_exact_goal_not_double():
+    store, todos, rs = make()
+    rs.sync(Day(D, 12), Settings())
+    for it in todos.list():
+        todos.user_edit(it.href, complete=True)
+    out = rs.sync(Day(D, 12), Settings())
+    from trener.engine import apply_reports
+    day = apply_reports(Day(D, 12), out.reports).day
+    assert (day.morning, day.evening, day.total) == (6, 6, 12)
+
+
+def test_evening_reminder_completes_only_with_whole_day():
+    store, todos, rs = make()
+    rs.sync(Day(D, 12), Settings())
+    rs.sync(Day(D, 12, morning=2, evening=6), Settings())     # večerné vedro „plné“, deň nie
+    e = todos.by_summary_contains("Večer")[0]
+    assert not e.completed and e.summary == "💪 Večer: 4 klikov"
+    rs.sync(Day(D, 12, morning=2, evening=10), Settings())
+    assert todos.by_summary_contains("Večer")[0].completed
+
+
+def test_completion_keeps_last_summary_not_zero():
+    store, todos, rs = make()
+    rs.sync(Day(D, 10), Settings())
+    rs.sync(Day(D, 10, morning=3), Settings())
+    rs.sync(Day(D, 10, morning=5), Settings())
+    m = todos.by_summary_contains("Ráno")[0]
+    assert m.completed and m.summary == "💪 Ráno: 2 klikov"
+
+
+def test_lost_db_adopts_existing_reminders_instead_of_duplicating():
+    store, todos, rs = make()
+    rs.sync(Day(D, 10), Settings())
+    assert len(todos.list()) == 2
+    fresh_store = Store(":memory:")
+    rs2 = ReminderSync(todos, fresh_store, TZ)
+    out = rs2.sync(Day(D, 10, morning=2), Settings())
+    assert len(todos.list()) == 2 and any("prevzatá" in n for n in out.notes)
+    assert todos.by_summary_contains("Ráno")[0].summary == "💪 Ráno: 3 klikov"
+
+
+def test_backend_exception_becomes_error_not_crash():
+    store, todos, rs = make()
+
+    class Boom(FakeTodos):
+        def list(self):
+            raise RuntimeError("connection refused")
+    rs.todos = Boom()
+    out = rs.sync(Day(D, 10), Settings())
+    assert out.errors and not out.reports
+
+
+def test_alarm_trigger_is_absolute_with_value_param():
+    from trener.caldav_todo import build_todo_ics
+    ics = build_todo_ics("u1", "x", datetime(2026, 9, 2, 5, 0, tzinfo=timezone.utc))
+    assert b"TRIGGER;VALUE=DATE-TIME:20260902T050000Z" in ics
+    it = parse_item("h", "e", ics)
+    out = apply_changes(it, due=datetime(2026, 9, 2, 6, 0, tzinfo=timezone.utc))
+    assert b"TRIGGER;VALUE=DATE-TIME:20260902T060000Z" in out and out.count(b"TRIGGER") == 1

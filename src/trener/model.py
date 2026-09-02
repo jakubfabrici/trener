@@ -117,12 +117,13 @@ class Day:
         return self.goal > 0 and self.total >= self.goal
 
     def session_done(self, session: str) -> bool:
-        """Fáza je hotová, keď je jej vedro plné ALEBO je splnený celý deň."""
+        """Ranná fáza je hotová, keď je ranné vedro plné (alebo je splnený deň);
+        večerná fáza má dokončiť deň → je hotová až so splneným dňom."""
         if self.done:
             return True
         if session == MORNING:
             return self.morning >= self.morning_target
-        return self.evening >= self.evening_target
+        return False
 
     def session_count(self, session: str) -> int:
         return self.morning if session == MORNING else self.evening
