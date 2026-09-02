@@ -63,6 +63,17 @@ def test_default_session_by_evening_time():
     assert default_session(at(23, 59), s) == EVENING
 
 
+def test_default_session_switches_when_morning_bucket_is_full():
+    s = Settings(evening_time="19:20")
+    # ráno 5/5 hotové, deň nie → poobedné číslo ide do večera, nie do „ráno 10/5“
+    assert default_session(at(13, 45), s, Day(D, 10, morning=5)) == EVENING
+    assert default_session(at(13, 45), s, Day(D, 10, morning=4)) == MORNING
+    # splnený deň: extra kliky ostávajú v aktuálnej fáze podľa hodín
+    assert default_session(at(13, 45), s, Day(D, 10, morning=5, evening=5)) == MORNING
+    # večer ostáva večerom aj keď ráno chýba (dobehnúť sa dá cez „ráno N“)
+    assert default_session(at(20, 0), s, Day(D, 10)) == EVENING
+
+
 def test_streak_rules():
     days = [Day(date(2026, 8, 29), 10, 5, 5), Day(date(2026, 8, 30), 10, 10, 0),
             Day(date(2026, 8, 31), 10, 0, 0, frozen=True), Day(date(2026, 9, 1), 12, 6, 6),

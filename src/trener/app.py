@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
+import queue
 import sys
 from datetime import date, datetime, timedelta
 
@@ -26,6 +27,7 @@ from trener.engine import (WAKE_FLOOR, Snapshot, apply_reports, compute_streak, 
 from trener.model import EVENING, MORNING, Day, Report, Settings
 from trener.parsing import parse_message
 from trener.reminders import ReminderSync
+from trener.shortcuts import ShortcutBridge
 from trener.smb_io import Busy, Conflict, make_backend
 from trener.store import Store
 from trener.table import TableCorrupt, merge, parse_workbook, render_workbook
@@ -40,6 +42,12 @@ class Trainer:
         self.cfg, self.store, self.backend, self.todos, self.send = cfg, store, backend, todos, send
         self.tz = cfg.tz
         self.rem = ReminderSync(todos, store, cfg.tz) if todos else None
+        # iCloud Pripomienky cez iOS Skratku (bot do iCloudu zapisovať nevie – robí to telefón)
+        self.bridge = ShortcutBridge(store, cfg.tz, cfg.reminders_list) \
+            if cfg.reminders_mode == "shortcuts" else None
+        self.inbox: queue.SimpleQueue = queue.SimpleQueue()
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.last_shortcut_at: datetime | None = None
         self.lock = asyncio.Lock()
         self._kick = asyncio.Event()
         self.table_dirty = True
@@ -61,6 +69,7 @@ class Trainer:
         self.woke_date: date | None = None
         self.started_at = self.now()
         self._health_snapshot: dict = {"today": None, "frozen": False}
+        self._plan_snapshot: dict = {"pripomienky": [], "pocet": 0}
         self.last_report: dict | None = None     # posledné hlásenie z chatu (na ↩️ Vrátiť / 🎯 Bol to cieľ)
 
     # ── pomôcky ─────────────────────────────────────────────────────────────
@@ -104,9 +113,59 @@ class Trainer:
         snap.update({"ok": True, "time": self.now().isoformat(), "started": self.started_at.isoformat(),
                      "table": {"ok": self.table_ok, "busy": self.table_busy, "last_sync": self.last_table_sync,
                                "url": self.cfg.table_url, "warnings": self.table_warnings[:5]},
-                     "reminders": {"enabled": self.rem is not None, "ok": self.rem_ok,
-                                   "last_sync": self.last_rem_sync}})
+                     "reminders": {"mode": self.cfg.reminders_mode,
+                                   "enabled": self.rem is not None or self.bridge is not None,
+                                   "ok": self.rem_ok, "last_sync": self.last_rem_sync,
+                                   "last_shortcut": self.last_shortcut_at}})
         return snap
+
+    # ── iOS Skratka (iCloud Pripomienky) ────────────────────────────────────
+    def shortcut_plan(self) -> dict:
+        """Volá web server (iné vlákno) – vracia snímku, do DB nesiaha."""
+        return dict(self._plan_snapshot)
+
+    def shortcut_report(self, payload: dict) -> dict:
+        """Volá web server (iné vlákno) – hlásenie ide do fronty, spracuje ho tick."""
+        self.inbox.put(payload)
+        self.last_shortcut_at = self.now()
+        if self.loop is not None:
+            self.loop.call_soon_threadsafe(self.kick)
+        return {"ok": True}
+
+    async def _drain_inbox(self) -> None:
+        if self.bridge is None:
+            return
+        items = []
+        while True:
+            try:
+                items.append(self.inbox.get_nowait())
+            except queue.Empty:
+                break
+        if not items:
+            return
+        day = self.today_day()
+        out = self.bridge.apply(day, self.settings(), items)
+        for n in out.notes:
+            log.info("Skratka: %s", n)
+        if out.settings_changed:
+            self.store.save_settings(out.settings)
+            self.table_dirty = True
+            learned = [n for n in out.notes if "podľa tvojej úpravy" in n]
+            if learned and not out.settings.frozen:
+                await self.send("📱 " + " ".join(learned) + " Platí pre všetky ďalšie dni.")
+        if out.reports:
+            res = self._apply(out.reports)
+            if not res.completed_now and not out.settings.frozen:
+                await self.send("📱 " + M.report_reply(
+                    res.day, res.added, False, compute_streak(self.store.all_days(), day.date),
+                    next_goal(res.day, out.settings, self.cfg.seed_goal)).split("\n", 1)[1])
+
+    def _refresh_shortcut_snapshot(self) -> None:
+        if self.bridge is None:
+            return
+        day = self.store.get_day(self.now().date())
+        if day is not None:
+            self._plan_snapshot = self.bridge.plan(day, self.settings())
 
     def _refresh_health_snapshot(self) -> None:
         d = self.store.get_day(self.now().date())
@@ -127,6 +186,7 @@ class Trainer:
         if self.store.get_meta("current_date") is None:
             self.store.set_meta("current_date", today.isoformat())
         self.today_day()
+        self._refresh_shortcut_snapshot()
         self._refresh_health_snapshot()
 
     # ── hlavná slučka ───────────────────────────────────────────────────────
@@ -150,6 +210,7 @@ class Trainer:
             now = self.now()
             self._table_failed_this_tick = False
             await self._rollover_if_needed(now)
+            await self._drain_inbox()
             if self._table_wanted(now):
                 await self._sync_table()
             if self.rem and (self.rem_dirty or self._due(self.last_rem_sync, self.cfg.reminders_sync_seconds)):
@@ -159,6 +220,7 @@ class Trainer:
                 await self._sync_table()
             await self._check_completion("tabuľka/Pripomienky")
             await self._nags(now)
+            self._refresh_shortcut_snapshot()
             self._refresh_health_snapshot()
 
     def _table_wanted(self, now: datetime) -> bool:
@@ -430,8 +492,9 @@ class Trainer:
                     # správa z fronty po výpadku (Telegram ich doručí dodatočne) – patrí inému dňu
                     log.info("Stará správa z %s ignorovaná: %r", sent_at.isoformat(timespec="minutes"), text)
                     return M.STALE_MESSAGE.format(when=f"{sent_at.day}.{sent_at.month}. {sent_at:%H:%M}")
-            # fáza podľa času ODOSLANIA (po výpadku sa správy doručia neskôr)
-            pr = parse_message(text, default_session(sent_at, s))
+            # fáza podľa času ODOSLANIA (po výpadku sa správy doručia neskôr) a podľa toho,
+            # ktorá fáza ešte nie je hotová
+            pr = parse_message(text, default_session(sent_at, s, self.today_day()))
             if not pr.ok:
                 return M.ERRORS.get(pr.error or "no_number", M.NOT_A_NUMBER)
             today = now.date()
@@ -566,11 +629,20 @@ class Trainer:
 
     async def force_sync(self) -> str:
         async with self.lock:
+            await self._drain_inbox()
             await self._sync_table()
             if self.rem:
                 await self._sync_reminders()
             await self._check_completion("tabuľka/Pripomienky")
-        rem = "vypnuté" if not self.rem else ("✅" if self.rem_ok else "⚠️ nedostupné")
+        async with self.lock:
+            self._refresh_shortcut_snapshot()
+        if self.bridge is not None:
+            at = self.last_shortcut_at.strftime("%H:%M") if self.last_shortcut_at else "zatiaľ nikdy"
+            rem = f"iCloud cez Skratku (telefón sa ozval {at})"
+        elif self.rem:
+            rem = "✅" if self.rem_ok else "⚠️ nedostupné"
+        else:
+            rem = "vypnuté"
         return M.SYNCED.format(table="✅" if self.table_ok else "⚠️ nedostupná", rem=rem)
 
     async def status_text(self) -> str:
@@ -622,10 +694,16 @@ def main() -> None:
     store = Store(cfg.state_db)
     backend = make_backend(cfg)
     todos = None
-    if cfg.caldav_url and cfg.caldav_username and cfg.caldav_password:
-        todos = TodoList(cfg.caldav_url, cfg.caldav_username, cfg.caldav_password, cfg.caldav_list)
+    if cfg.reminders_mode == "caldav":
+        if cfg.caldav_url and cfg.caldav_username and cfg.caldav_password:
+            todos = TodoList(cfg.caldav_url, cfg.caldav_username, cfg.caldav_password, cfg.caldav_list)
+        else:
+            log.warning("REMINDERS_MODE=caldav, ale CALDAV_* nie sú nastavené – Pripomienky vypnuté.")
+    elif cfg.reminders_mode == "shortcuts":
+        log.info("Pripomienky: iCloud zoznam '%s' cez iOS Skratku (/plan, /hotovo, /uprav).",
+                 cfg.reminders_list)
     else:
-        log.warning("CALDAV_* nie sú nastavené – Pripomienky vypnuté.")
+        log.info("Pripomienky vypnuté (REMINDERS_MODE=off).")
     log.info("Tabuľka: %s", backend.describe())
 
     application: Application = (ApplicationBuilder().token(cfg.bot_token)
@@ -675,11 +753,15 @@ async def post_init(application: Application) -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("set_my_commands: %s", e)
     loop = asyncio.get_running_loop()
+    trainer.loop = loop
     try:
         application.bot_data["web"] = start_web_server(
             cfg.web_port, cfg.wake_token,
             on_wake=lambda: loop.call_soon_threadsafe(trainer.wake),
-            health=trainer.health)
+            health=trainer.health,
+            shortcut_token=cfg.shortcut_token if trainer.bridge else None,
+            plan=trainer.shortcut_plan if trainer.bridge else None,
+            report=trainer.shortcut_report if trainer.bridge else None)
     except OSError as e:
         log.error("Web server na porte %d sa nespustil: %s", cfg.web_port, e)
     # vlastný task (nie application.create_task – ten by Application.stop() čakal donekonečna)

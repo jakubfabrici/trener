@@ -2,6 +2,7 @@
 tabuľka (xlsx na disku), falošný CalDAV zoznam, riadený čas. Simuluje reálne dni."""
 import asyncio
 import io
+from dataclasses import replace
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -27,12 +28,13 @@ def at(h, m=0, s=0, d=D):
 
 
 class Harness:
-    def __init__(self, tmp: Path, start: datetime):
+    def __init__(self, tmp: Path, start: datetime, mode: str = "caldav"):
         self.sent: list[str] = []
         self.clock = [start]
         cfg = Config(bot_token="x", owner_chat_id=1, tz=TZ, state_db=tmp / "t.db", log_file=None,
                      table_backend="local", smb_server="", smb_share="", smb_path="", smb_username="",
                      smb_password="", local_table_path=tmp / "kliky.xlsx", table_sync_seconds=120,
+                     reminders_mode="caldav", reminders_list="Kliky", shortcut_token="tok",
                      caldav_url=None, caldav_username=None, caldav_password=None, caldav_list="Kliky",
                      reminders_sync_seconds=120, web_port=0, wake_token=None, ha_alarm_url=None,
                      seed_goal=12, seed_increment=2, seed_morning="07:00", seed_evening="19:20", tick_seconds=30)
@@ -44,9 +46,16 @@ class Harness:
         async def send(text):
             self.sent.append(text)
 
+        if mode == "shortcuts":
+            cfg = replace(cfg, reminders_mode="shortcuts")
+        self.cfg = cfg
         self.t = A.Trainer(cfg, self.store, self.backend, None, send)
-        self.t.todos = self.todos
-        self.t.rem = ReminderSync(self.todos, self.store, TZ)
+        if mode == "shortcuts":
+            self.t.rem = None
+            self.t.todos = None
+        else:
+            self.t.todos = self.todos
+            self.t.rem = ReminderSync(self.todos, self.store, TZ)
         self.t.now = lambda: self.clock[0]
         self.t.bootstrap()
 
@@ -95,6 +104,12 @@ class Harness:
 @pytest.fixture
 def h(tmp_path):
     return Harness(tmp_path, at(6, 0))
+
+
+@pytest.fixture
+def hs(tmp_path):
+    """Harness v režime iCloud Pripomienok cez iOS Skratku."""
+    return Harness(tmp_path, at(6, 0), mode="shortcuts")
 
 
 def test_first_start_creates_table_and_reminders(h):
@@ -347,11 +362,11 @@ def test_stale_message_from_yesterday_ignored(h):
 def test_delayed_same_day_message_uses_send_time_for_session(h):
     h.tick_at(at(6, 0))
     # odoslané 18:45 (ranná fáza), spracované 19:30 po reštarte → ráno, nie večer
-    reply = asyncio.run(h.t.handle_text("6", when=at(18, 45)))
-    assert "Ráno: 6/6" in reply
+    reply = asyncio.run(h.t.handle_text("2", when=at(18, 45)))
+    assert "Ráno: 2/6" in reply
     h.clock[0] = at(19, 30)
     reply = asyncio.run(h.t.handle_text("3", when=at(18, 50)))
-    assert "Ráno: 9/6" in reply and h.store.get_day(D).evening == 0
+    assert "Ráno: 5/6" in reply and h.store.get_day(D).evening == 0
 
 
 def test_message_just_before_midnight_counts_for_yesterday(h):
@@ -424,3 +439,104 @@ def test_correction_down_via_table_unticks_reminder(h):
     h.edit_table(D, Ráno=2)
     h.tick_at(at(7, 9))
     assert not h.reminder("Ráno").completed and h.reminder("Ráno").summary == "💪 Ráno: 4 klikov"
+
+
+def test_extra_reps_after_full_morning_go_to_evening(h):
+    h.tick_at(at(6, 0))
+    r1 = h.text(at(7, 5), "5")
+    assert "Ráno: 5/6" in r1
+    r2 = h.text(at(7, 30), "1")            # ráno 6/6 → hotové
+    assert "Ráno: 6/6" in r2
+    r3 = h.text(at(13, 45), "5")           # poobede, ranné vedro plné → večer
+    assert "Večer: 5/6" in r3 and "Dnes: 11/12" in r3
+    day = h.store.get_day(D)
+    assert (day.morning, day.evening) == (6, 5)
+    # explicitné „ráno“ stále funguje
+    assert "Ráno: 8/6" in h.text(at(14, 0), "2 ráno")
+
+
+# ── iCloud Pripomienky cez iOS Skratku ──────────────────────────────────────
+
+def test_shortcut_plan_and_tick_off(hs):
+    hs.tick_at(at(6, 0))
+    plan = hs.t.shortcut_plan()
+    assert plan["zoznam"] == "Kliky" and plan["pocet"] == 2 and plan["ciel"] == 12
+    m, e = plan["pripomienky"]
+    assert m["nazov"] == "💪 Ráno: 6 klikov" and m["cas_kratky"] == "07:00"
+    assert m["poznamka"] == "kliky:2026-09-02:morning"
+    assert e["nazov"] == "💪 Večer: 6 klikov" and e["cas"].endswith("19:20:00+02:00")
+
+    # telefón hlási odškrtnutie rannej
+    assert hs.t.shortcut_report({"kind": "done", "poznamka": m["poznamka"]}) == {"ok": True}
+    hs.tick_at(at(8, 0))
+    assert hs.store.get_day(D).morning == 6
+    msgs = hs.take()
+    assert len(msgs) == 1 and msgs[0].startswith("📱")
+    # v pláne už ranná nie je, večerná ukazuje zvyšok
+    plan = hs.t.shortcut_plan()
+    assert plan["pocet"] == 1 and plan["pripomienky"][0]["nazov"] == "💪 Večer: 6 klikov"
+    # opakované hlásenie to nepripíše druhýkrát
+    hs.t.shortcut_report({"kind": "done", "poznamka": m["poznamka"]})
+    hs.tick_at(at(8, 5))
+    assert hs.store.get_day(D).morning == 6
+    assert hs.table_rows()[D][1] == 6      # zapísané aj do tabuľky
+
+
+def test_shortcut_completes_whole_day(hs):
+    hs.tick_at(at(6, 0))
+    for r in hs.t.shortcut_plan()["pripomienky"]:
+        hs.t.shortcut_report({"kind": "done", "poznamka": r["poznamka"]})
+    hs.tick_at(at(20, 0))
+    day = hs.store.get_day(D)
+    assert (day.morning, day.evening, day.total) == (6, 6, 12) and day.done
+    assert any("🎉" in m for m in hs.take())
+    assert hs.t.shortcut_plan()["pocet"] == 0
+
+
+def test_shortcut_learns_edited_title_and_time(hs):
+    hs.tick_at(at(6, 0))
+    note = "kliky:2026-09-02:morning"
+    hs.t.shortcut_report({"kind": "edit", "poznamka": note, "nazov": "Kliky ráno – 6 kusov",
+                          "cas": "06:30"})
+    hs.tick_at(at(5, 0))
+    s = hs.t.settings()
+    assert s.morning_title == "Kliky ráno – {n} kusov" and s.morning_time == "06:30"
+    assert any("podľa tvojej úpravy" in m for m in hs.take())
+    plan = hs.t.shortcut_plan()
+    assert plan["pripomienky"][0]["nazov"] == "Kliky ráno – 6 kusov"
+    assert plan["pripomienky"][0]["cas_kratky"] == "06:30"
+    # nový čas platí aj pre výzvy v chate
+    hs.tick_at(at(6, 30))
+    assert [m.startswith("☀️") for m in hs.take()] == [True]
+
+
+def test_shortcut_deleted_reminder_not_offered_again_today(hs):
+    hs.tick_at(at(6, 0))
+    hs.t.shortcut_report({"kind": "deleted", "poznamka": "kliky:2026-09-02:evening"})
+    hs.tick_at(at(6, 5))
+    plan = hs.t.shortcut_plan()
+    assert [r["faza"] for r in plan["pripomienky"]] == ["morning"]
+    # zajtra normálne
+    hs.tick_at(at(0, 0, 30, D + timedelta(days=1)))
+    assert len(hs.t.shortcut_plan()["pripomienky"]) == 2
+
+
+def test_shortcut_plan_empty_when_frozen(hs):
+    hs.tick_at(at(6, 0))
+    asyncio.run(hs.t.set_frozen(True))
+    hs.tick_at(at(6, 5))
+    plan = hs.t.shortcut_plan()
+    assert plan["zamrazene"] is True and plan["pocet"] == 0
+    asyncio.run(hs.t.set_frozen(False))
+    hs.tick_at(at(6, 10))
+    assert hs.t.shortcut_plan()["pocet"] == 2
+
+
+def test_shortcut_ignores_foreign_and_old_notes(hs):
+    hs.tick_at(at(6, 0))
+    for bad in ({"kind": "done", "poznamka": "nakup mlieko"},
+                {"kind": "done", "poznamka": "kliky:2026-08-31:morning"},
+                {"kind": "cosi", "poznamka": "kliky:2026-09-02:morning"}):
+        hs.t.shortcut_report(bad)
+    hs.tick_at(at(6, 5))
+    assert hs.store.get_day(D).total == 0 and hs.take() == []

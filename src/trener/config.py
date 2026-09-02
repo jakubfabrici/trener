@@ -30,6 +30,10 @@ class Config:
     smb_password: str
     local_table_path: Path
     table_sync_seconds: int
+    # pripomienky: "shortcuts" (iCloud cez iOS Skratku), "caldav" (Radicale) alebo "off"
+    reminders_mode: str
+    reminders_list: str
+    shortcut_token: str | None
     # pripomienky (Radicale CalDAV)
     caldav_url: str | None
     caldav_username: str | None
@@ -65,6 +69,9 @@ def load() -> Config:
     backend = (_env("TABLE_BACKEND", "smb") or "smb").strip().lower()
     if backend not in ("smb", "local"):
         raise SystemExit(f"TABLE_BACKEND musí byť 'smb' alebo 'local' (je {backend!r}).")
+    mode = (_env("REMINDERS_MODE", "shortcuts") or "shortcuts").strip().lower()
+    if mode not in ("shortcuts", "caldav", "off"):
+        raise SystemExit(f"REMINDERS_MODE musí byť 'shortcuts', 'caldav' alebo 'off' (je {mode!r}).")
     return Config(
         bot_token=token,
         owner_chat_id=int(owner),
@@ -79,6 +86,9 @@ def load() -> Config:
         smb_password=_env("SMB_PASSWORD", ""),
         local_table_path=Path(_env("LOCAL_TABLE_PATH", "/var/lib/trener/kliky.xlsx")),
         table_sync_seconds=int(_env("TABLE_SYNC_SECONDS", "120")),
+        reminders_mode=mode,
+        reminders_list=_env("REMINDERS_LIST", _env("CALDAV_LIST", "Kliky")),
+        shortcut_token=_env("SHORTCUT_TOKEN") or _env("WAKE_WEBHOOK_TOKEN"),
         caldav_url=_env("CALDAV_URL"),
         caldav_username=_env("CALDAV_USERNAME"),
         caldav_password=_env("CALDAV_PASSWORD"),

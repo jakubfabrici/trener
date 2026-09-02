@@ -30,10 +30,44 @@ def _client_is_local(handler: BaseHTTPRequestHandler) -> bool:
         return False
 
 
-def start_web_server(port: int, token: str | None, on_wake, health) -> ThreadingHTTPServer:
+def start_web_server(port: int, token: str | None, on_wake, health, shortcut_token: str | None = None,
+                     plan=None, report=None) -> ThreadingHTTPServer:
+    """`plan()` vráti dnešný plán pripomienok pre iOS Skratku, `report(dict)` prijme,
+    čo Skratka nahlásila (odškrtnutie, úprava, zmazanie). Obe sa volajú z vlákna
+    servera – musia byť bezpečné (v app.py idú cez snímku a frontu)."""
+
+    def _json(handler, code, data):
+        body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
+        handler.send_response(code)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
     class Handler(BaseHTTPRequestHandler):
+        def _shortcut_ok(self, q) -> bool:
+            got = q.get("token", [""])[0]
+            return bool(shortcut_token) and hmac.compare_digest(got.encode("utf-8"),
+                                                                shortcut_token.encode("utf-8"))
+
         def do_GET(self):  # noqa: N802
             u = urlparse(self.path)
+            if u.path in ("/plan", "/hotovo", "/uprav", "/zmazane"):
+                q = parse_qs(u.query)
+                if not self._shortcut_ok(q):
+                    self._plain(403, "Forbidden")
+                    return
+                if u.path == "/plan":
+                    _json(self, 200, plan() if plan else {"chyba": "vypnuté"})
+                    return
+                if report is None:
+                    _json(self, 200, {"ok": False, "chyba": "vypnuté"})
+                    return
+                kind = {"/hotovo": "done", "/uprav": "edit", "/zmazane": "deleted"}[u.path]
+                one = lambda k: q.get(k, [""])[0]  # noqa: E731
+                _json(self, 200, report({"kind": kind, "poznamka": one("poznamka"),
+                                         "nazov": one("nazov"), "cas": one("cas")}))
+                return
             if u.path == "/health":
                 data = health() if _client_is_local(self) else {"ok": True}   # z internetu len „žijem“
                 body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
@@ -60,6 +94,9 @@ def start_web_server(port: int, token: str | None, on_wake, health) -> Threading
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self):  # noqa: N802 – Skratka vie poslať aj POST
+            self.do_GET()
 
         def log_message(self, fmt, *args):  # ticho
             pass

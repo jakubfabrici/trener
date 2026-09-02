@@ -60,9 +60,20 @@ def apply_reports(day: Day, reports: list[Report]) -> ApplyResult:
     return ApplyResult(new_day, added, completed_now, sess_now)
 
 
-def default_session(now: datetime, settings: Settings) -> str:
-    """Do ktorej fázy patrí číslo bez upresnenia: pred večerným časom ráno, potom večer."""
-    return MORNING if now.time() < hhmm_to_time(settings.evening_time) else EVENING
+def default_session(now: datetime, settings: Settings, day: Day | None = None) -> str:
+    """Do ktorej fázy patrí číslo bez upresnenia.
+
+    Základ je hodinami: pred večerným časom ráno, potom večer. Ak je však vedro tej
+    fázy už plné a deň ešte nie je splnený, číslo patrí druhej fáze – kliky navyše
+    dopoludnia sú v skutočnosti náskok na večer (nemá zmysel mať „ráno 10/5“).
+    """
+    base = MORNING if now.time() < hhmm_to_time(settings.evening_time) else EVENING
+    if day is None or day.done:
+        return base
+    other = EVENING if base == MORNING else MORNING
+    if day.session_done(base) and not day.session_done(other):
+        return other
+    return base
 
 
 # ── streak a prechod dňa ─────────────────────────────────────────────────────
