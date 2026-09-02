@@ -49,7 +49,14 @@ trener/ios/Kliky/postav-ipa.sh
 
 Alebo cez GitHub Actions — workflow `.github/workflows/kliky-ios.yml` sa spustí
 pri každej zmene v `trener/ios/**` alebo ručne cez *Run workflow*. Hotovú IPA si
-stiahneš z artefaktov behu (`Kliky-ipa`).
+stiahneš z artefaktov behu (`Kliky-ipa`). Overené: runner `macos-26`, Xcode 26.6,
+iOS SDK 26.5, build prejde a IPA sa vyrobí.
+
+Pozor na jednu vec, keby si `project.yml` upravoval: kľúč `info:` znamená pre
+XcodeGen „vygeneruj Info.plist“ a prepíše ten náš. Tým by z appky vypadli
+`NSAlarmKitUsageDescription` a `NSRemindersFullAccessUsageDescription`, iOS by
+povolenia vôbec neponúkol a appka by ticho nefungovala. Preto tam `info:` nie je
+a plist ide cez `INFOPLIST_FILE`; `postav-ipa.sh` oba kľúče kontroluje.
 
 IPA je **nepodpísaná naschvál**. Podpíše ju až AltStore tvojím Apple ID priamo na
 telefóne — preto v CI netreba žiadne certifikáty ani tajomstvá.
