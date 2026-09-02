@@ -589,7 +589,9 @@ def test_app_api_status_and_reporting(h):
     # oprava na presnú hodnotu
     h.t.shortcut_report({"kind": "reps", "poznamka": st["poznamka_rano"], "n": "6", "absolute": True})
     h.tick_at(at(7, 35))
-    assert h.store.get_day(D).morning == 6 and h.t.shortcut_plan()["stav"]["rano_hotovo"] is True
+    st2 = h.t.shortcut_plan()["stav"]
+    assert h.store.get_day(D).morning == 6 and st2["rano_hotovo"] is True
+    assert st2["rano_nazov"] == "💪 Ráno: 6 klikov"      # splnené: koľko si dal, nie 0
 
 
 def test_app_api_freeze_roundtrip(h):
