@@ -38,7 +38,7 @@ def test_wake_and_health():
         req = urllib.request.Request(base + "/health", headers={"X-Forwarded-For": "192.168.1.50"})
         assert "today" in json.loads(urllib.request.urlopen(req).read())
         # podvrhnutý privátny prefix pred skutočnou IP (NPM appenduje) → stále len ok
-        req = urllib.request.Request(base + "/health", headers={"X-Forwarded-For": "10.0.0.1, 203.0.113.5"})
+        req = urllib.request.Request(base + "/health", headers={"X-Forwarded-For": "10.0.0.1, 1.1.1.1"})
         assert json.loads(urllib.request.urlopen(req).read()) == {"ok": True}
     finally:
         srv.shutdown()
