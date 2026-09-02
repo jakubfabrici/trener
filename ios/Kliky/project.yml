@@ -1,0 +1,40 @@
+# XcodeGen: `brew install xcodegen && cd trener/ios/Kliky && xcodegen generate`
+# Vytvorí Kliky.xcodeproj, ktorý sa dá otvoriť v Xcode alebo zostaviť cez xcodebuild.
+name: Kliky
+options:
+  bundleIdPrefix: xyz.fabrici
+  deploymentTarget:
+    iOS: "26.1"
+  createIntermediateGroups: true
+  developmentLanguage: sk
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Swift 5 režim zámerne: kód beží celý na hlavnom vlákne a EventKit má
+    # dodnes neanotované doplnenia, ktoré by v Swift 6 režime hádzali chyby.
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    IPHONEOS_DEPLOYMENT_TARGET: "26.1"
+    TARGETED_DEVICE_FAMILY: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  Kliky:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    info:
+      path: Resources/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: xyz.fabrici.kliky
+        PRODUCT_NAME: Kliky
+        INFOPLIST_FILE: Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ENABLE_PREVIEWS: YES

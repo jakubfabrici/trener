@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>sk</string>
+    <key>CFBundleDisplayName</key><string>Kliky</string>
+    <key>CFBundleName</key><string>Kliky</string>
+    <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>LSRequiresIPhoneOS</key><true/>
+    <key>UILaunchScreen</key><dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array><string>UIInterfaceOrientationPortrait</string></array>
+    <key>UIBackgroundModes</key>
+    <array><string>fetch</string></array>
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array><string>xyz.fabrici.kliky.obnova</string></array>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Aby ti Kliky vedeli zapisovať rannú a večernú pripomienku do tvojho zoznamu v iCloude a odškrtnúť ju, keď kliky spravíš.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Aby ti Kliky vedeli zapisovať rannú a večernú pripomienku do tvojho zoznamu v iCloude.</string>
+    <key>NSAlarmKitUsageDescription</key>
+    <string>Aby ti Kliky vedeli ráno a večer zazvoniť budíkom, ktorý počuť aj cez tichý režim.</string>
+    <key>NSUserNotificationsUsageDescription</key>
+    <string>Aby ti Kliky vedeli pripomenúť tréning.</string>
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
+</dict>
+</plist>
