@@ -9,10 +9,20 @@ zvyšné upozornenia z eventu odstráni, takže zvonenie prestane. Žiadna ďal�
 rozsynchronizuje sám.
 
 Hranica, ktorú Apple nedovolí prekročiť: upozornenie z Kalendára (ani z Pripomienok)
-**neprebije tichý prepínač**. Cez tichý režim a Nerušiť smie zvoniť len appka
-s oprávnením **Critical Alerts** (Home Assistant, Pushover, Pushsafer). Kód pre takýto
-kanál v bote je (`alarm.py`, `ALARM_MODE`), ale je **vypnutý** – zapína sa len na výslovné
-želanie.
+**neprebije tichý prepínač**. Cez tichý režim a Nerušiť smie zvoniť len:
+
+- appka s oprávnením **Critical Alerts** (Home Assistant, Pushover, Pushsafer) – Apple ho
+  dáva iba zdravotníckym a bezpečnostným appkám. Kód pre takýto kanál v bote je
+  (`alarm.py`, `ALARM_MODE`), ale je **vypnutý** – zapína sa len na výslovné želanie;
+- **AlarmKit** – od iOS 26 smie appka tretej strany budík, ktorý prejde tichým režimom
+  aj Sústredením, a Apple ho neschvaľuje. Lenže musí to byť **natívna appka v telefóne**,
+  server ju nenahradí. Vyskúšali sme to (appka „Kliky“, budíky aj EventKit pripomienky,
+  build overený na Xcode 26.6) a **zavrhli** – nestála za réžiu s inštaláciou a
+  7-dňovým podpisom. Ak by sa to raz malo oživiť, je to commit `c45f95a`.
+
+Inými slovami: s dnešným riešením zvoní ranné a večerné upozornenie ako bežná
+kalendárová udalosť. Keď je telefón na tichom, nezvoní – to je vedomé rozhodnutie,
+nie chyba.
 
 ## Krátko
 

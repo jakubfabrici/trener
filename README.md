@@ -118,10 +118,4 @@ doplniť („včera 5“ alebo tabuľka).
 - Testy: `python -m pytest trener/tests` (100 testov: parsovanie, engine, tabuľka, pripomienky,
   end-to-end simulácia dní a integračný test proti reálnemu Radicale, ak je nainštalované).
 
-## Appka pre iPhone
-
-Budíky, ktoré zvonia aj cez tichý režim, nevie spraviť žiadny server — musí to byť
-appka na telefóne s AlarmKitom. Zdroják je v [ios/Kliky](ios/Kliky), postup na
-zostavenie a nasadenie cez AltStore v [docs/IOS-APPKA.md](docs/IOS-APPKA.md).
-
 Diagnóza pôvodnej verzie: [docs/DIAGNOZA-v1.md](docs/DIAGNOZA-v1.md).
