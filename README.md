@@ -93,7 +93,7 @@ Voliteľne: iOS Skratka „Keď sa vypne režim Spánok → Získať obsah z URL
 Na Proxmoxe (`pve`), z checkoutu tejto vetvy:
 
 ```bash
-VMID=122 IP_CIDR=192.168.1.254/24 bash trener/deploy/bootstrap-lxc.sh
+VMID=122 IP_CIDR=192.168.1.254/24 bash deploy/bootstrap-lxc.sh
 pct exec 122 -- nano /etc/trener/trener.env      # BOT_TOKEN, OWNER_CHAT_ID, SMB_PASSWORD
 pct exec 122 -- systemctl restart trener
 pct exec 122 -- journalctl -u trener -f
@@ -115,7 +115,7 @@ doplniť („včera 5“ alebo tabuľka).
   v tabuľke. Zmazať DB = bot si všetko načíta z tabuľky (stratí len históriu výziev).
 - Radicale dáta: `/var/lib/radicale/collections/collection-root/jakub/…` (záloha = kópia
   adresára; pri kopírovaní za behu použi `flock /var/lib/radicale/collections/.Radicale.lock`).
-- Testy: `python -m pytest trener/tests` (100 testov: parsovanie, engine, tabuľka, pripomienky,
+- Testy: `python -m pytest tests` (100 testov: parsovanie, engine, tabuľka, pripomienky,
   end-to-end simulácia dní a integračný test proti reálnemu Radicale, ak je nainštalované).
 
 Diagnóza pôvodnej verzie: [docs/DIAGNOZA-v1.md](docs/DIAGNOZA-v1.md).
