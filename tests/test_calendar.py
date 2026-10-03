@@ -6,12 +6,18 @@ import pytest
 from icalendar import Calendar
 
 from trener.calendar_sync import CalendarSync, apply_event_changes, build_event_ics, event_start
-from trener.model import EVENING, MORNING, Day, Settings
+from trener.model import EVENING, MORNING, Day, ReminderState, Settings, hhmm_to_time
 from trener.store import Store
 from test_app import FakeCalendar
 
 TZ = ZoneInfo("Europe/Bratislava")
-D = date(2026, 9, 2)
+# Pozor: D je STREDA – deň s rannou aj večernou fázou. Utorok/štvrtok/sobota majú
+# len ráno a nedeľa je voľno; tie vetvy treba testovať na vlastných dátumoch.
+D = date(2026, 9, 2)            # streda – ráno 2X aj večer 2X
+D_UT = date(2026, 9, 1)         # utorok – len ráno 2X
+D_NE = date(2026, 9, 6)         # nedeľa – voľno, cieľ 0
+D_PO_NEXT = date(2026, 9, 7)    # pondelok ďalšieho týždňa – X je už o krok vyššie
+X5 = Settings(x=5, x_since="2026-08-31")     # X = 5 pre týždeň 31.8. – 6.9.2026, teda 2X = 10
 
 
 def make():
@@ -27,6 +33,21 @@ def by(cal, word):
 
 def has_alarm(item) -> bool:
     return any(c.name == "VALARM" for c in item.vtodo.subcomponents)
+
+
+def plan_day(d: date, settings: Settings = X5, **kw) -> Day:
+    """Deň s cieľom presne podľa týždenného plánu (nie ručne vymysleným číslom)."""
+    return Day(d, settings.goal_for(d), **kw)
+
+
+def leftover(store, cal, d: date, session: str, summary: str, hhmm: str):
+    """Udalosť, ktorá na dni zostala po starom pláne – aj so záznamom v DB."""
+    uid = f"kliky-{d.isoformat()}-{session}-stary"
+    start = datetime.combine(d, hhmm_to_time(hhmm), tzinfo=TZ)
+    created = cal.create(uid, build_event_ics(uid, summary, start, 15))
+    store.save_reminder(ReminderState(d, session, created.href, uid, created.etag, summary, hhmm),
+                        "events")
+    return created
 
 
 def test_creates_morning_and_evening_alarm_events():
@@ -160,3 +181,92 @@ def test_alarm_offsets_are_configurable():
     cs.offsets = (0, 5)
     cs.sync(Day(D, 10), Settings())
     assert sum(1 for c in by(cal, "Ráno").vtodo.subcomponents if c.name == "VALARM") == 2
+
+
+# ── nový týždenný plán: voľné dni a fázy, ktoré v ten deň nie sú ────────────
+
+def test_v_nedelu_ziadny_event():
+    store, cal, cs = make()
+    day = plan_day(D_NE)
+    assert day.is_rest and day.goal == 0
+    out = cs.sync(day, X5)
+    assert cal.list() == [] and not out.errors
+    cs.sync(day, X5)                                   # ani po druhom syncu
+    assert cal.list() == []
+    assert store.get_reminder(D_NE, MORNING, "events") is None
+    assert store.get_reminder(D_NE, EVENING, "events") is None
+
+
+def test_v_utorok_len_ranny_event():
+    store, cal, cs = make()
+    day = plan_day(D_UT)
+    assert (day.goal, day.morning_target, day.evening_target) == (10, 10, 0)   # 2X ráno
+    out = cs.sync(day, X5)
+    assert [i.summary for i in cal.list()] == ["💪 Ráno: 10 klikov"]
+    assert has_alarm(by(cal, "Ráno")) and by(cal, "Večer") is None and not out.errors
+    assert store.get_reminder(D_UT, EVENING, "events") is None
+    cs.sync(day, X5)                                   # večerný nepribudne ani neskôr
+    assert by(cal, "Večer") is None
+
+
+def test_stary_vecerny_event_v_utorok_sa_zmaze_nie_oznaci():
+    store, cal, cs = make()
+    leftover(store, cal, D_UT, EVENING, "💪 Večer: 6 klikov", "19:20")
+    out = cs.sync(plan_day(D_UT), X5)
+    assert by(cal, "Večer") is None                                      # naozaj zmazaný
+    assert [i.summary for i in cal.list()] == ["💪 Ráno: 10 klikov"]     # nezostalo „✅ Večer“
+    assert store.get_reminder(D_UT, EVENING, "events") is None
+    assert any("zmazaný" in n and "utorok" in n for n in out.notes)
+
+
+def test_nedelny_zvysok_po_starom_plane_sa_zmaze():
+    store, cal, cs = make()
+    leftover(store, cal, D_NE, MORNING, "💪 Ráno: 6 klikov", "07:00")
+    leftover(store, cal, D_NE, EVENING, "💪 Večer: 6 klikov", "19:20")
+    out = cs.sync(plan_day(D_NE), X5)
+    assert cal.list() == [] and not out.errors
+    assert store.get_reminder(D_NE, MORNING, "events") is None
+    assert store.get_reminder(D_NE, EVENING, "events") is None
+
+
+def test_nedelny_zvysok_sa_zmaze_aj_bez_zaznamu_v_db():
+    """Po strate DB udalosť poznáme len podľa UID – aj tak ju treba upratať,
+    inak v nedeľu naveky zvoní budík na kliky, ktoré plán nechce."""
+    store, cal, cs = make()
+    uid = f"kliky-{D_NE.isoformat()}-morning-stary"
+    start = datetime.combine(D_NE, hhmm_to_time("07:00"), tzinfo=TZ)
+    cal.create(uid, build_event_ics(uid, "💪 Ráno: 6 klikov", start, 15))
+    out = cs.sync(plan_day(D_NE), X5)
+    assert cal.list() == [] and not out.errors
+
+
+def test_utorkove_rano_zavrie_cely_den_a_umlci_budik():
+    store, cal, cs = make()
+    day = plan_day(D_UT)
+    cs.sync(day, X5)
+    done = day.copy(morning=day.morning_target)
+    assert done.done                                   # 2X ráno je celý utorkový cieľ
+    cs.sync(done, X5)
+    m = by(cal, "Ráno")
+    assert m.summary == "✅ 💪 Ráno: 10 klikov" and not has_alarm(m)
+    assert len(cal.list()) == 1                        # večerný event nepribudne ani po splnení
+
+
+def test_nazvy_eventov_obsahuju_dvojnasobok_x():
+    store, cal, cs = make()
+    cs.sync(plan_day(D), X5)                           # streda: 2X ráno + 2X večer
+    assert sorted(i.summary for i in cal.list()) == ["💪 Ráno: 10 klikov", "💪 Večer: 10 klikov"]
+    _, cal2, cs2 = make()
+    cs2.sync(plan_day(D_PO_NEXT), X5)                  # o týždeň je X o krok vyššie → 2X = 12
+    assert sorted(i.summary for i in cal2.list()) == ["💪 Ráno: 12 klikov", "💪 Večer: 12 klikov"]
+
+
+def test_strata_db_neduplikuje_eventy():
+    """Rovnaká záruka ako pri pripomienkach (test_lost_db_adopts_existing_reminders…):
+    dnešný event sa po strate DB prevezme podľa UID, nevytvorí sa druhý raz."""
+    store, cal, cs = make()
+    cs.sync(plan_day(D), X5)
+    assert len(cal.list()) == 2
+    cs2 = CalendarSync(cal, Store(":memory:"), TZ)      # nová prázdna DB, ten istý kalendár
+    out = cs2.sync(plan_day(D), X5)
+    assert len(cal.list()) == 2 and not out.errors

@@ -64,8 +64,8 @@ class Config:
     alarm_expire: int
     alarm_webhook_url: str | None
     # východiskové hodnoty pri prvom štarte (kým tabuľka neexistuje)
-    seed_goal: int
-    seed_increment: int
+    seed_x: int
+    seed_x_step: int
     seed_morning: str
     seed_evening: str
     tick_seconds: int
@@ -144,8 +144,8 @@ def load() -> Config:
         alarm_retry=int(_env("ALARM_RETRY", "60")),
         alarm_expire=int(_env("ALARM_EXPIRE", "600")),
         alarm_webhook_url=_env("ALARM_WEBHOOK_URL") or _env("HA_ALARM_WEBHOOK_URL"),
-        seed_goal=int(_env("SEED_GOAL", "10")),
-        seed_increment=int(_env("SEED_INCREMENT", "2")),
+        seed_x=max(int(_env("SEED_X", "8")), 1),
+        seed_x_step=max(int(_env("SEED_X_STEP", "1")), 0),
         seed_morning=_env("SEED_MORNING_TIME", "07:00"),
         seed_evening=_env("SEED_EVENING_TIME", "19:20"),
         tick_seconds=int(_env("TICK_SECONDS", "30")),

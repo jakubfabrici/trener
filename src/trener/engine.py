@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta, timezone
 
-from trener.model import (DONE, EVENING, FAILED, FROZEN, MORNING, SESSIONS, Day, NagState,
-                          Report, Settings, Snapshot, hhmm_to_time)
+from trener.model import (EVENING, MORNING, SESSIONS, Day, NagState, Report, Settings, Snapshot,
+                          hhmm_to_time, week_start)
 
 WAKE_FLOOR = dtime(4, 0)      # wake signál pred 04:00 nie je ranné vstávanie
 MAX_NAG_DELAY = timedelta(hours=3)   # po výpadku nedoháňame výzvy staršie ako 3 h
@@ -71,34 +71,90 @@ def default_session(now: datetime, settings: Settings, day: Day | None = None) -
     if day is None or day.done:
         return base
     other = EVENING if base == MORNING else MORNING
-    if day.session_done(base) and not day.session_done(other):
+    # Prehodiť fázu má zmysel len medzi fázami, ktoré v ten deň naozaj sú. V utorok
+    # večer nie je kam preliať – kliky o 20:00 sa zapíšu na večer, nech sedí, kedy
+    # vznikli. Stráž musí byť na OBOCH stranách: neplánovaná fáza je „hotová“ hneď,
+    # takže bez nej by sa večerné kliky ticho presypali do rána.
+    if (day.session_planned(base) and day.session_done(base)
+            and day.session_planned(other) and not day.session_done(other)):
         return other
     return base
 
 
 # ── streak a prechod dňa ─────────────────────────────────────────────────────
 
-def compute_streak(days: list[Day], today: date) -> int:
-    """Streak = počet po sebe splnených dní končiac včerajškom (dnešok sa pridá, ak je splnený).
+# stavy týždňa
+WEEK_DONE = "week_done"        # všetky tréningové dni splnené
+WEEK_FAILED = "week_failed"    # aspoň jeden uzavretý tréningový deň nesplnený
+WEEK_OPEN = "week_open"        # ešte beží, zatiaľ bez zlyhania
+WEEK_EMPTY = "week_empty"      # samé voľno alebo zamrazené – streak neprerušuje ani nepridáva
 
-    Zamrazené dni streak neprerušujú (ako Duolingo streak freeze), ale ani nepridávajú.
+
+def week_status(days: dict[date, Day], monday: date, today: date, settings: Settings,
+                since: date | None = None) -> str:
+    """Ako dopadol týždeň začínajúci daným pondelkom.
+
+    Deň bez záznamu sa hodnotí podľa plánu: ak naň plán nič nepredpisuje (nedeľa),
+    nevadí; ak predpisuje a je v minulosti, týždeň padá. Zamrazené dni sa preskakujú
+    presne ako predtým – sú to choroby a dovolenky, nie zlyhania.
+
+    `since` je prvý deň, o ktorom vôbec máme vedieť. Dni pred ním bot ešte nebežal –
+    nie sú to zlyhania, inak by prvý rozbehový týždeň nikdy nešiel započítať.
     """
+    splnene = False
+    otvorene = False
+    for i in range(7):
+        d = monday + timedelta(days=i)
+        if since is not None and d < since:
+            continue                       # vtedy bot ešte nebežal
+        day = days.get(d)
+        if day is not None:
+            goal = day.goal
+        else:
+            goal = settings.goal_for(d)   # deň bez záznamu sa hodnotí podľa plánu
+        if goal <= 0:
+            continue                       # voľno – netreba nič
+        if day is not None and day.done:
+            splnene = True
+            continue
+        if day is not None and day.frozen:
+            continue                       # ❄️ neprerušuje
+        if d >= today:
+            otvorene = True                # ešte sa dá stihnúť
+            continue
+        return WEEK_FAILED
+    if otvorene:
+        return WEEK_OPEN
+    return WEEK_DONE if splnene else WEEK_EMPTY
+
+
+def compute_streak(days: list[Day], today: date, settings: Settings) -> int:
+    """Streak = počet po sebe **splnených týždňov** (pondelok–nedeľa).
+
+    Týždeň je splnený, keď si zvládol všetky tréningové dni; nedeľa je voľno a
+    netreba v nej nič. Bežiaci týždeň sa započíta, až keď je celý hotový – čiže
+    typicky v sobotu večer. Celý zamrazený týždeň streak neprerušuje ani nepridáva.
+    """
+    by_date = {d.date: d for d in days}
+    if not by_date:
+        return 0
+    zaciatok = min(by_date)
+    najstarsi = week_start(zaciatok)
+    wk = week_start(today)
     streak = 0
-    for d in sorted(days, key=lambda x: x.date):
-        if d.date > today:
-            continue
-        st = d.status(today)
-        if st == DONE:
+    while wk >= najstarsi:
+        st = week_status(by_date, wk, today, settings, since=zaciatok)
+        if st == WEEK_DONE:
             streak += 1
-        elif st == FROZEN:
-            continue
-        elif st == FAILED:
-            streak = 0
-        # OPEN (dnešok nesplnený) streak zatiaľ neprerušuje
+        elif st in (WEEK_EMPTY, WEEK_OPEN):
+            pass                           # bežiaci ani prázdny týždeň streak neruší
+        else:
+            break
+        wk -= timedelta(days=7)
     return streak
 
 
-def streak_after(days: list[Day], d: date, today: date | None = None) -> int:
+def streak_after(days: list[Day], d: date, today: date | None, settings: Settings) -> int:
     """Streak k danému dňu (pre stĺpec „Streak“ v tabuľke).
 
     Minulý deň sa hodnotí ako uzavretý (nesplnený = reset); dnešok ako otvorený.
@@ -107,20 +163,19 @@ def streak_after(days: list[Day], d: date, today: date | None = None) -> int:
         ref = d + timedelta(days=1)
     else:
         ref = today
-    return compute_streak([x for x in days if x.date <= d], ref)
+    return compute_streak([x for x in days if x.date <= d], ref, settings)
 
 
-def next_goal(prev: Day | None, settings: Settings, seed_goal: int) -> int:
-    """Cieľ nového dňa: po splnenom dni +prírastok, inak rovnaký. Bez trestov."""
-    if prev is None:
-        return seed_goal
-    if prev.done:
-        return prev.goal + max(settings.increment, 0)
-    return prev.goal
+def next_goal(prev: Day, settings: Settings) -> int:
+    """Cieľ dňa NASLEDUJÚCEHO po `prev` – čisto z plánu, bez ohľadu na výsledok.
+
+    Ponechaný názov, aby volajúci kód („čo ťa čaká zajtra“) zostal čitateľný. Deň sa
+    berie z `prev`, nikdy zo systémových hodín – testy aj výpadky si vozia vlastný čas.
+    """
+    return settings.goal_for(prev.date + timedelta(days=1))
 
 
-def fill_missing_days(days: list[Day], today: date, settings: Settings, seed_goal: int,
-                      frozen_since: date | None = None) -> list[Day]:
+def fill_missing_days(days: list[Day], today: date, settings: Settings) -> list[Day]:
     """Doplní chýbajúce dni od posledného známeho po dnešok (výpadok bota).
 
     Chýbajúce minulé dni sa berú ako zamrazené (bot nebežal, nie je to chyba
@@ -130,18 +185,44 @@ def fill_missing_days(days: list[Day], today: date, settings: Settings, seed_goa
     past = [d for d in by_date if d <= today]
     if not past:
         # žiadny dnešný ani minulý deň (prázdna DB alebo len budúce riadky od používateľa)
-        return [Day(today, seed_goal, frozen=settings.frozen)]
+        goal = settings.goal_for(today)
+        return [Day(today, goal, frozen=settings.frozen and goal > 0)]
     last = max(past)
     new: list[Day] = []
     d = last + timedelta(days=1)
     while d <= today:
-        prev = by_date[d - timedelta(days=1)]
-        goal = next_goal(prev, settings, seed_goal)
-        frozen = settings.frozen or d < today
+        goal = settings.goal_for(d)
+        # zameškaný deň je zamrazený (bot nebežal), voľný deň zamrazovať netreba
+        frozen = (settings.frozen or d < today) and goal > 0
         new.append(Day(d, goal, frozen=frozen))
         by_date[d] = new[-1]
         d += timedelta(days=1)
     return new
+
+
+def replan(days: list[Day], settings: Settings, today: date,
+           predosle: Settings | None = None) -> list[Day]:
+    """Prepočíta ciele podľa plánu pre DNEŠOK a budúcnosť. História sa nikdy neprepisuje –
+    uzavretý deň sa hodnotí podľa cieľa, ktorý vtedy platil.
+
+    Používa sa, keď sa zmení X (z chatu alebo z tabuľky) – inak by dnešný riadok
+    ostal visieť so starým cieľom až do polnoci.
+
+    `predosle` sú nastavenia spred zmeny. Keď ich dostaneme, prepíšeme len tie dni,
+    ktoré ešte sedeli na starý plán – ručne prepísaný cieľ v tabuľke ostáva platiť,
+    presne ako sľubuje nápoveda v hárku.
+    """
+    zmenene = []
+    for d in days:
+        if d.date < today:
+            continue
+        goal = settings.goal_for(d.date)
+        if goal == d.goal:
+            continue
+        if predosle is not None and predosle.goal_for(d.date) != d.goal:
+            continue                        # ručne nastavený cieľ – nechaj ho tak
+        zmenene.append(d.copy(goal=goal))
+    return zmenene
 
 
 # ── výzvy v chate (nag) ──────────────────────────────────────────────────────

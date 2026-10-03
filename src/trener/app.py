@@ -25,8 +25,8 @@ from trener.alarm import send_alarm
 from trener.caldav_todo import TodoList
 from trener.calendar_sync import CalendarSync, EventCalendar
 from trener.engine import (WAKE_FLOOR, Snapshot, apply_reports, compute_streak, default_session, elapsed,
-                           fill_missing_days, next_goal, plan, streak_after)
-from trener.model import EVENING, MORNING, Day, Report, Settings
+                           fill_missing_days, next_goal, plan, replan, streak_after)
+from trener.model import EVENING, FAILED, MORNING, Day, Report, Settings, week_start
 from trener.parsing import parse_message
 from trener.reminders import ReminderSync
 from trener.shortcuts import ShortcutBridge, app_status
@@ -101,7 +101,7 @@ class Trainer:
         d = self.store.get_day(t)
         if d is None:
             days = self.store.all_days()
-            for nd in fill_missing_days(days, t, self.settings(), self.cfg.seed_goal):
+            for nd in fill_missing_days(days, t, self.settings()):
                 self.store.save_day(nd)
             d = self.store.get_day(t)
         return d
@@ -182,8 +182,8 @@ class Trainer:
             res = self._apply(out.reports)
             if not res.completed_now and not out.settings.frozen:
                 await self.send("📱 " + M.report_reply(
-                    res.day, res.added, False, compute_streak(self.store.all_days(), day.date),
-                    next_goal(res.day, out.settings, self.cfg.seed_goal)).split("\n", 1)[1])
+                    res.day, res.added, False, compute_streak(self.store.all_days(), day.date, self.settings()),
+                    next_goal(res.day, out.settings)).split("\n", 1)[1])
 
     def _refresh_shortcut_snapshot(self) -> None:
         day = self.store.get_day(self.now().date())
@@ -191,8 +191,8 @@ class Trainer:
             return
         s = self.settings()
         plan = self.bridge.plan(day, s) if self.make_reminders else {"pripomienky": [], "pocet": 0}
-        plan["stav"] = app_status(day, s, compute_streak(self.store.all_days(), day.date),
-                                  next_goal(day, s, self.cfg.seed_goal), self.tz)
+        plan["stav"] = app_status(day, s, compute_streak(self.store.all_days(), day.date, self.settings()),
+                                  next_goal(day, s), self.tz)
         plan["pripomienky_zapnute"] = self.make_reminders
         self._plan_snapshot = plan
 
@@ -207,7 +207,8 @@ class Trainer:
     # ── štart ───────────────────────────────────────────────────────────────
     def bootstrap(self) -> None:
         if not self.store.c.execute("SELECT 1 FROM settings LIMIT 1").fetchone():
-            s = Settings(increment=self.cfg.seed_increment, morning_time=self.cfg.seed_morning,
+            s = Settings(x=self.cfg.seed_x, x_since=week_start(self.now().date()).isoformat(),
+                         x_step=self.cfg.seed_x_step, morning_time=self.cfg.seed_morning,
                          evening_time=self.cfg.seed_evening)
             self.store.save_settings(s)
             log.info("Prvý štart – nastavenia: %s", s)
@@ -276,15 +277,15 @@ class Trainer:
             await self._sync_reminders(day=old_day, allow_create=False)
         settings = self.settings()
         days = self.store.all_days()
-        for nd in fill_missing_days(days, today, settings, self.cfg.seed_goal):
+        for nd in fill_missing_days(days, today, settings):
             self.store.save_day(nd)
         yday = self.store.get_day(today - timedelta(days=1))
         tday = self.store.get_day(today)
         log.info("Nový deň %s: cieľ %s (včera %s).", today, tday.goal if tday else "?",
                  f"{yday.total}/{yday.goal} {yday.status(today)}" if yday else "-")
-        if yday and tday and yday.status(today) == "failed" and settings.summary_on_fail and not settings.frozen:
-            before = streak_after(self.store.all_days(), yday.date - timedelta(days=1), today)
-            await self.send(M.day_failed(yday, before, tday.goal))
+        if yday and tday and yday.status(today) == FAILED and settings.summary_on_fail and not settings.frozen:
+            before = streak_after(self.store.all_days(), yday.date - timedelta(days=1), today, settings)
+            await self.send(M.day_failed(yday, before, tday.goal, today))
         if yday is not None:
             await self._finalize_calendar(yday, today)
         self.store.set_meta("current_date", today.isoformat())
@@ -328,7 +329,7 @@ class Trainer:
                 return
         settings_before = self.settings()
         m = merge(parsed, self.store.days_with_synced(), settings_before,
-                  self.store.get_settings_synced(), today, self.cfg.seed_goal)
+                  self.store.get_settings_synced(), today)
         # prevezmi zmeny z tabuľky do lokálneho stavu
         before_today = self.store.get_day(today)
         for d in m.deleted_days:
@@ -340,16 +341,21 @@ class Trainer:
         if m.changed_settings:
             self.store.save_settings(m.settings)
             self.rem_dirty = True
+            if any(k in m.changed_settings for k in ("x", "x_since", "x_step")):
+                self.cal_dirty = True
+                if self._replan(m.settings, today, settings_before):
+                    m = merge(parsed, self.store.days_with_synced(), m.settings,
+                              self.store.get_settings_synced(), today)
             if "frozen" in m.changed_settings and m.settings.frozen != settings_before.frozen:
                 self._apply_frozen_to_today(m.settings.frozen)
                 log.info("Zamrazenie zmenené v tabuľke: %s", m.settings.frozen)
                 # dnešný riadok sa zmenil → do tabuľky
                 m = merge(parsed, self.store.days_with_synced(), m.settings,
-                          self.store.get_settings_synced(), today, self.cfg.seed_goal)
+                          self.store.get_settings_synced(), today)
         for note in m.from_table:
             log.info("Tabuľka → bot: %s", note)
         if m.to_table:
-            streaks = {d.date: streak_after(m.days, d.date, today) for d in m.days}
+            streaks = {d.date: streak_after(m.days, d.date, today, m.settings) for d in m.days}
             data = await asyncio.to_thread(render_workbook, existing, m.days, m.settings, streaks, today, parsed)
             try:
                 stamp = await self._guarded("_table_inflight", self.backend.write, data, stamp, timeout=30)
@@ -458,8 +464,8 @@ class Trainer:
             res = self._apply(out.reports)
             if not res.completed_now and not out.settings.frozen:
                 await self.send(M.report_reply(res.day, res.added, False,
-                                               compute_streak(self.store.all_days(), today.date),
-                                               next_goal(res.day, out.settings, self.cfg.seed_goal))
+                                               compute_streak(self.store.all_days(), today.date, self.settings()),
+                                               next_goal(res.day, out.settings))
                                 .replace("✅", "📱", 1))
 
     # ── budík v iCloud kalendári ────────────────────────────────────────────
@@ -523,7 +529,7 @@ class Trainer:
             return
         self.store.set_meta("announced_done_date", today.isoformat())
         if not self.settings().frozen:
-            streak = compute_streak(self.store.all_days(), today)
+            streak = compute_streak(self.store.all_days(), today, self.settings())
             await self.send(M.done_from_elsewhere(day, source, streak))
         self.rem_dirty = True
 
@@ -586,11 +592,11 @@ class Trainer:
                 if target is None:
                     return f"Na {target_date.day}.{target_date.month}. nemám žiadny riadok – doplň ho do tabuľky."
                 res = self._apply(pr.reports, target)
-                streak = compute_streak(self.store.all_days(), today)
+                streak = compute_streak(self.store.all_days(), today, self.settings())
                 log.info("Hlásenie za %s %s → %s/%s", target_date,
                          [(r.session, r.n, r.absolute) for r in pr.reports], res.day.total, res.day.goal)
                 return M.report_reply(res.day, res.added, res.completed_now, streak,
-                                      next_goal(res.day, s, self.cfg.seed_goal), when="včera")
+                                      next_goal(res.day, s), when="včera")
             before = self.today_day()
             res = self._apply(pr.reports)
             if res.completed_now:
@@ -599,11 +605,11 @@ class Trainer:
             self.last_report = {"date": today, "before": (before.morning, before.evening),
                                 "after": (res.day.morning, res.day.evening),
                                 "n": pr.reports[0].n if single else None}
-            streak = compute_streak(self.store.all_days(), today)
+            streak = compute_streak(self.store.all_days(), today, self.settings())
             log.info("Hlásenie %s → %s/%s (ráno %s, večer %s)", [(r.session, r.n, r.absolute) for r in pr.reports],
                      res.day.total, res.day.goal, res.day.morning, res.day.evening)
             return M.report_reply(res.day, res.added, res.completed_now, streak,
-                                  next_goal(res.day, s, self.cfg.seed_goal))
+                                  next_goal(res.day, s))
 
     def undo_available(self) -> tuple[bool, bool]:
         """(dá sa vrátiť, dá sa prehlásiť za cieľ) – pre tlačidlá pod odpoveďou."""
@@ -621,23 +627,31 @@ class Trainer:
                 return M.NOTHING_TO_UNDO
             bm, be = lr["before"]
             new = day.copy(morning=bm, evening=be)
-            if as_goal and lr["n"]:
-                new = new.copy(goal=int(lr["n"]))
             self.store.save_day(new)
+            if as_goal and lr["n"]:
+                # „bolo to X, nie kliky“ – číslo bolo nové X, nie hlásenie
+                predosle = self.settings()
+                s2, monday = predosle.with_x(int(lr["n"]), today)
+                self._save_settings(s2)
+                self._replan(s2, today, predosle)
+                if not self.today_day().done:
+                    # po zmene X má deň iný cieľ – nesmie ostať „dnes už oznámené"
+                    self.store.set_meta("announced_done_date", None)
+                self.last_report = None
+                self.table_dirty = self.rem_dirty = True
+                self.kick()
+                return M.UNDONE + "\n" + M.x_set(s2, monday, self.today_day(), today)
             if not new.done:
                 self.store.set_meta("announced_done_date", None)
             self.last_report = None
             self.table_dirty = self.rem_dirty = True
             self.kick()
             log.info("Vrátené posledné hlásenie (as_goal=%s): %s → %s", as_goal, lr["after"], (bm, be))
-            if as_goal:
-                return M.UNDONE_AS_GOAL.format(n=new.goal, m=new.morning_target, e=new.evening_target)
-            return M.UNDONE + "\n" + M.report_reply(new, {}, False, compute_streak(self.store.all_days(), today),
-                                                     next_goal(new, self.settings(), self.cfg.seed_goal))
+            return M.UNDONE + "\n" + M.report_reply(new, {}, False, compute_streak(self.store.all_days(), today, self.settings()),
+                                                     next_goal(new, self.settings()))
 
     def goal_prompt(self) -> str:
-        day = self.today_day()
-        return M.GOAL_PICK.format(goal=day.goal, m=day.morning_target, e=day.evening_target)
+        return M.x_pick(self.settings(), self.today_day())
 
     async def fix(self, session: str, n: int) -> str:
         async with self.lock:
@@ -645,33 +659,45 @@ class Trainer:
             today = self.now().date()
             if res.completed_now:
                 self.store.set_meta("announced_done_date", today.isoformat())
-            streak = compute_streak(self.store.all_days(), today)
+            streak = compute_streak(self.store.all_days(), today, self.settings())
             return M.report_reply(res.day, res.added, res.completed_now, streak,
-                                  next_goal(res.day, self.settings(), self.cfg.seed_goal))
+                                  next_goal(res.day, self.settings()))
 
-    async def set_goal(self, n: int) -> str:
+    async def set_x(self, n: int) -> str:
+        """X pre bežiaci týždeň (v nedeľu pre nasledujúci) + prepočet dneška a budúcna."""
         async with self.lock:
-            day = self.today_day()
-            was_done = day.done
-            day = day.copy(goal=n)
-            self.store.save_day(day)
-            self.table_dirty = self.rem_dirty = True
+            today = self.now().date()
+            was_done = self.today_day().done
+            predosle = self.settings()
+            s, monday = predosle.with_x(n, today)
+            self._save_settings(s)
+            self._replan(s, today, predosle)
             self.kick()
+            day = self.today_day()
             extra = ""
             if day.done and not was_done:
                 self.store.set_meta("announced_done_date", day.date.isoformat())
                 extra = "\n🎉 Tým je dnešok splnený."
             elif not day.done and was_done:
                 self.store.set_meta("announced_done_date", None)
-            return M.GOAL_SET.format(goal=n, m=day.morning_target, e=day.evening_target,
-                                     inc=self.settings().increment) + extra
+            return M.x_set(s, monday, day, today) + extra
 
-    async def set_increment(self, n: int) -> str:
+    def _replan(self, s: Settings, today: date, predosle: Settings | None = None) -> int:
+        """Prepočíta ciele dneška a budúcich dní podľa plánu. História ostáva, aká bola.
+        Ručne prepísaný cieľ v tabuľke sa nechá na pokoji (preto `predosle`)."""
+        zmenene = replan(self.store.all_days(), s, today, predosle)
+        for d in zmenene:
+            self.store.save_day(d)
+        if zmenene:
+            log.info("Plán prepočítaný: %d dní (X=%d od %s).", len(zmenene), s.x, s.x_since)
+        return len(zmenene)
+
+    async def set_x_step(self, n: int) -> str:
         async with self.lock:
-            s = self.settings().copy(increment=n)
+            s = self.settings().copy(x_step=n)
             self._save_settings(s)
             self.kick()
-            return M.SAVED.format(what=f"prírastok +{n} po splnenom dni")
+            return M.SAVED.format(what=f"rast X o {n} každý pondelok")
 
     async def set_time(self, session: str, hhmm: str) -> str:
         async with self.lock:
@@ -732,18 +758,18 @@ class Trainer:
         async with self.lock:
             day = self.today_day()
             s = self.settings()
-            streak = compute_streak(self.store.all_days(), day.date)
+            streak = compute_streak(self.store.all_days(), day.date, self.settings())
             at = self.last_table_sync.strftime("%H:%M") if self.last_table_sync else None
             return M.status(day, s, streak, self.table_ok, at, self.rem_ok if self.rem else None,
-                            next_goal(day, s, self.cfg.seed_goal),
+                            next_goal(day, s),
                             self.cal_ok if self.cal_sync else None, self.cfg.calendar_name)
 
     async def stats_text(self) -> str:
         async with self.lock:
             days = self.store.all_days()
             today = self.now().date()
-            streak = compute_streak(days, today)
-            best = max([streak_after(days, d.date, today) for d in days] + [0])
+            streak = compute_streak(days, today, self.settings())
+            best = max([streak_after(days, d.date, today, self.settings()) for d in days] + [0])
             return M.stats(days, today, streak, best)
 
     async def table_info(self) -> str:

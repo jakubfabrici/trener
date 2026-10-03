@@ -2,13 +2,21 @@
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
-from trener.caldav_todo import apply_changes, parse_item
-from trener.model import EVENING, MORNING, Day, Settings
-from trener.reminders import ReminderSync, learn_template, session_number
+from trener.caldav_todo import apply_changes, build_todo_ics, parse_item
+from trener.engine import apply_reports
+from trener.model import EVENING, MORNING, Day, ReminderState, Settings
+from trener.reminders import ReminderSync, due_for, learn_template, session_number
 from trener.store import Store
 
 TZ = ZoneInfo("Europe/Bratislava")
-D = date(2026, 9, 2)
+# Pozor: D je STREDA – deň s rannou aj večernou fázou. Na vetvy ut/št/so a nedeľu
+# treba iné dátumy, inak sa celý nový plán otestuje len na jednom type dňa.
+D = date(2026, 9, 2)            # streda – ráno 2X aj večer 2X
+D_UT = date(2026, 9, 1)         # utorok – len ráno 2X
+D_PO = date(2026, 8, 31)        # pondelok toho istého týždňa – ráno aj večer
+D_NE = date(2026, 9, 6)         # nedeľa – voľno, cieľ 0
+D_PO_NEXT = date(2026, 9, 7)    # pondelok ďalšieho týždňa – X je už o krok vyššie
+X5 = Settings(x=5, x_since="2026-08-31")     # X = 5 pre týždeň 31.8. – 6.9.2026, teda 2X = 10
 
 
 class FakeTodos:
@@ -56,6 +64,19 @@ def make():
     store = Store(":memory:")
     todos = FakeTodos()
     return store, todos, ReminderSync(todos, store, TZ)
+
+
+def plan_day(d: date, settings: Settings = X5, **kw) -> Day:
+    """Deň s cieľom presne podľa týždenného plánu (nie ručne vymysleným číslom)."""
+    return Day(d, settings.goal_for(d), **kw)
+
+
+def leftover(store, todos, d: date, session: str, summary: str, hhmm: str):
+    """Pripomienka, ktorá na dni zostala po starom pláne – aj so záznamom v DB."""
+    uid = f"kliky-{d.isoformat()}-{session}-stary"
+    created = todos.create(uid, build_todo_ics(uid, summary, due_for(d, hhmm, TZ)))
+    store.save_reminder(ReminderState(d, session, created.href, uid, created.etag, summary, hhmm))
+    return created
 
 
 def test_creates_two_reminders_with_times_and_numbers():
@@ -160,13 +181,14 @@ def test_frozen_no_new_reminders_and_existing_left_alone():
 
 
 def test_old_open_reminders_deleted_completed_kept():
+    # starý deň musí mať obe fázy, inak nie je čo mazať – teda pondelok, nie utorok
     store, todos, rs = make()
-    rs.sync(Day(date(2026, 9, 1), 10), Settings())
-    rs.sync(Day(date(2026, 9, 1), 10, morning=5), Settings())   # ranná odčiarknutá
+    rs.sync(Day(D_PO, 10), Settings())
+    rs.sync(Day(D_PO, 10, morning=5), Settings())   # ranná odčiarknutá
     assert len(todos.list()) == 2
     rs.sync(Day(D, 10), Settings())
     summaries = sorted(i.summary for i in todos.list())
-    # včerajšia večerná (otvorená) zmazaná, včerajšia ranná (splnená) ostala, + 2 dnešné
+    # pondelková večerná (otvorená) zmazaná, pondelková ranná (splnená) ostala, + 2 dnešné
     assert len(summaries) == 3 and sum(1 for i in todos.list() if i.completed) == 1
 
 
@@ -262,3 +284,92 @@ def test_alarm_trigger_is_absolute_with_value_param():
     it = parse_item("h", "e", ics)
     out = apply_changes(it, due=datetime(2026, 9, 2, 6, 0, tzinfo=timezone.utc))
     assert b"TRIGGER;VALUE=DATE-TIME:20260902T060000Z" in out and out.count(b"TRIGGER") == 1
+
+
+# ── nový týždenný plán: voľné dni a fázy, ktoré v ten deň nie sú ────────────
+
+def test_v_nedelu_ziadna_pripomienka():
+    store, todos, rs = make()
+    day = plan_day(D_NE)
+    assert day.is_rest and day.goal == 0
+    out = rs.sync(day, X5)
+    assert todos.list() == [] and not out.errors and not out.reports
+    rs.sync(day, X5)                                   # ani po druhom syncu
+    assert todos.list() == []
+    assert store.get_reminder(D_NE, MORNING) is None
+    assert store.get_reminder(D_NE, EVENING) is None
+
+
+def test_v_utorok_len_ranna_pripomienka():
+    store, todos, rs = make()
+    day = plan_day(D_UT)
+    assert (day.goal, day.morning_target, day.evening_target) == (10, 10, 0)   # 2X ráno
+    out = rs.sync(day, X5)
+    assert [i.summary for i in todos.list()] == ["💪 Ráno: 10 klikov"]
+    assert not out.errors
+    assert store.get_reminder(D_UT, EVENING) is None
+    rs.sync(day, X5)                                   # večerná nepribudne ani neskôr
+    assert todos.by_summary_contains("Večer") == []
+
+
+def test_stara_vecerna_pripomienka_v_utorok_sa_zmaze_nie_odciarkne():
+    store, todos, rs = make()
+    leftover(store, todos, D_UT, EVENING, "💪 Večer: 6 klikov", "19:20")
+    out = rs.sync(plan_day(D_UT), X5)
+    assert [i.summary for i in todos.list()] == ["💪 Ráno: 10 klikov"]   # večerná je preč
+    assert not any(i.completed for i in todos.list())                    # nie „splnená“, ale zmazaná
+    assert store.get_reminder(D_UT, EVENING) is None
+    assert any("zmazaná" in n and "utorok" in n for n in out.notes)
+
+
+def test_nedelny_zvysok_po_starom_plane_sa_zmaze():
+    store, todos, rs = make()
+    leftover(store, todos, D_NE, MORNING, "💪 Ráno: 6 klikov", "07:00")
+    leftover(store, todos, D_NE, EVENING, "💪 Večer: 6 klikov", "19:20")
+    out = rs.sync(plan_day(D_NE), X5)
+    assert todos.list() == [] and not out.errors
+    assert store.get_reminder(D_NE, MORNING) is None
+    assert store.get_reminder(D_NE, EVENING) is None
+
+
+def test_nedelny_zvysok_sa_zmaze_aj_bez_zaznamu_v_db():
+    """Po strate DB pripomienku poznáme len podľa UID – aj tak ju treba upratať."""
+    store, todos, rs = make()
+    for session, summary, hhmm in ((MORNING, "💪 Ráno: 6 klikov", "07:00"),
+                                   (EVENING, "💪 Večer: 6 klikov", "19:20")):
+        uid = f"kliky-{D_NE.isoformat()}-{session}-stary"
+        todos.create(uid, build_todo_ics(uid, summary, due_for(D_NE, hhmm, TZ)))
+    out = rs.sync(plan_day(D_NE), X5)
+    assert todos.list() == [] and not out.errors
+
+
+def test_odciarknutie_rannej_v_utorok_zavrie_cely_den():
+    store, todos, rs = make()
+    day = plan_day(D_UT)
+    rs.sync(day, X5)
+    m = todos.by_summary_contains("Ráno")[0]
+    todos.user_edit(m.href, complete=True)
+    out = rs.sync(day, X5)
+    assert [(r.session, r.n, r.absolute) for r in out.reports] == [(MORNING, 10, True)]
+    closed = apply_reports(day, out.reports)
+    assert closed.day.total == 10 and closed.day.done and closed.completed_now
+    # deň je hotový rannou fázou – večerná sa nedorobí ani teraz
+    rs.sync(closed.day, X5)
+    assert [i.summary for i in todos.list()] == ["💪 Ráno: 10 klikov"]
+    assert todos.by_summary_contains("Ráno")[0].completed
+
+
+def test_nazvy_pripomienok_obsahuju_dvojnasobok_x():
+    store, todos, rs = make()
+    rs.sync(plan_day(D), X5)                           # streda: 2X ráno + 2X večer
+    assert sorted(i.summary for i in todos.list()) == ["💪 Ráno: 10 klikov", "💪 Večer: 10 klikov"]
+    _, todos2, rs2 = make()
+    rs2.sync(plan_day(D_PO_NEXT), X5)                  # o týždeň je X o krok vyššie → 2X = 12
+    assert sorted(i.summary for i in todos2.list()) == ["💪 Ráno: 12 klikov", "💪 Večer: 12 klikov"]
+
+
+def test_session_number_v_neplanovanych_fazach():
+    assert session_number(plan_day(D_UT), MORNING) == 10          # 2X
+    assert plan_day(D_UT).session_planned(EVENING) is False
+    assert session_number(plan_day(D_NE), MORNING) == 0
+    assert plan_day(D_NE).session_planned(MORNING) is False

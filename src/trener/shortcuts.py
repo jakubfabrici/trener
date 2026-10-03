@@ -47,15 +47,20 @@ def due_at(d: date, hhmm: str, tz: ZoneInfo) -> datetime:
 
 def app_status(day: Day, settings: Settings, streak: int, next_goal_value: int, tz) -> dict:
     """Kompletný stav pre mobilnú appku (jedno volanie = všetko, čo potrebuje)."""
+    planned = {ss: day.session_planned(ss) for ss in SESSIONS}
     return {
         "datum": day.date.isoformat(),
+        "den": day.weekday_sk,
+        "x": settings.x_for(day.date),
+        "volno": day.is_rest,
+        "stav": day.status(day.date),
         "ciel": day.goal,
         "rano": day.morning, "vecer": day.evening, "spolu": day.total, "zostava": day.left,
         "rano_ciel": day.morning_target, "vecer_ciel": day.evening_target,
         "rano_hotovo": day.session_done(MORNING), "vecer_hotovo": day.session_done(EVENING),
         "splneny": day.done,
         "zamrazene": bool(settings.frozen or day.frozen),
-        "streak": streak,
+        "streak": streak,                 # po novom: počet celých splnených týždňov
         "zajtra_ciel": next_goal_value,
         "rano_cas": settings.morning_time,
         "vecer_cas": settings.evening_time,
@@ -64,10 +69,14 @@ def app_status(day: Day, settings: Settings, streak: int, next_goal_value: int, 
                                    day.morning if day.session_done(MORNING) else session_number(day, MORNING)),
         "vecer_nazov": render_title(settings.title_template(EVENING),
                                     day.evening if day.session_done(EVENING) else session_number(day, EVENING)),
-        "rano_due": due_at(day.date, settings.morning_time, tz).isoformat(timespec="seconds"),
-        "vecer_due": due_at(day.date, settings.evening_time, tz).isoformat(timespec="seconds"),
-        "poznamka_rano": make_note(day.date, MORNING),
-        "poznamka_vecer": make_note(day.date, EVENING),
+        # fáza, ktorá v tento deň nie je v pláne, nesmie vydať čas ani poznámku –
+        # telefón by si na ňu naplánoval budík (nedeľa, večer v utorok/štvrtok/sobotu)
+        "rano_due": (due_at(day.date, settings.morning_time, tz).isoformat(timespec="seconds")
+                     if planned[MORNING] else None),
+        "vecer_due": (due_at(day.date, settings.evening_time, tz).isoformat(timespec="seconds")
+                      if planned[EVENING] else None),
+        "poznamka_rano": make_note(day.date, MORNING) if planned[MORNING] else "",
+        "poznamka_vecer": make_note(day.date, EVENING) if planned[EVENING] else "",
     }
 
 
@@ -90,6 +99,8 @@ class ShortcutBridge:
         """Čo má byť dnes v zozname. Zapíše si, čo vydalo (kvôli učeniu sa úprav)."""
         items = []
         for session in SESSIONS:
+            if not day.session_planned(session):
+                continue                     # nedeľa a večer v ut/št/so – žiadna pripomienka
             st = self.store.get_reminder(day.date, session) or ReminderState(day.date, session)
             done = day.session_done(session)
             n = session_number(day, session)
