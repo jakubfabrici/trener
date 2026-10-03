@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from icalendar import Alarm, Calendar, Event, vText
 
 from trener.caldav_todo import CalDavError, Conflict, TodoItem, TodoList
-from trener.model import (DONE, EVENING, FAILED, FROZEN, MORNING, SESSIONS, Day, ReminderState, Settings,
+from trener.model import (DONE, EVENING, FAILED, FROZEN, MORNING, REST, SESSIONS, Day, ReminderState, Settings,
                           hhmm_to_time)
 from trener.reminders import learn_template, render_title, session_number
 
@@ -28,7 +28,7 @@ log = logging.getLogger("trener.calendar")
 
 PRODID = "-//trener-klikov//v2//SK"
 TABLE = "events"
-STATE_MARK = {DONE: "✅", FAILED: "❌", FROZEN: "❄️"}
+STATE_MARK = {DONE: "✅", FAILED: "❌", FROZEN: "❄️", REST: "🌙"}
 
 
 class EventCalendar(TodoList):
@@ -167,6 +167,33 @@ class CalendarSync:
         settings = out.settings
         st = self.store.get_reminder(day.date, session, TABLE) or ReminderState(day.date, session)
         item = by_uid.get(st.uid) if st.uid else None
+        if item is None and not st.uid and not st.user_deleted:
+            # o evente nič nevieme (nová DB, alebo zostatok po starom pláne) – ak dnešný
+            # event tejto fázy na serveri je, prevezmeme ho namiesto vytvárania duplikátu
+            prefix = f"kliky-{day.date.isoformat()}-{session}-"
+            for uid, it in by_uid.items():
+                if uid.startswith(prefix):
+                    item = it
+                    st = ReminderState(day.date, session, it.href, uid, it.etag, it.summary,
+                                       (event_start(it, self.tz) or start_fallback(day, settings, session)
+                                        ).strftime("%H:%M"), False, False, 0, 0, False)
+                    out.notes.append(f"{_sk(session)}: prevzatý existujúci event {uid}")
+                    break
+
+        # ── fáza, ktorú plán v tento deň nemá ────────────────────────────
+        # nedeľa a večer v utorok/štvrtok/sobotu: nič nevytvárame a čo tam po starom
+        # pláne zostalo, zmažeme. Označiť to ✅ by nestačilo – zostal by tam event.
+        if day.session_target(session) <= 0:
+            if item is not None:
+                try:
+                    self.cal.delete(item)
+                    out.notes.append(f"{_sk(session)}: event zmazaný – {day.weekday_sk} "
+                                     f"túto fázu v pláne nemá")
+                except Exception as e:  # noqa: BLE001
+                    out.errors.append(f"{_sk(session)}: {e}")
+                    return
+            self.store.delete_reminder(day.date, session, TABLE)
+            return
 
         # ── čo spravil používateľ v kalendári ────────────────────────────
         if st.uid and item is None:
@@ -281,6 +308,11 @@ class CalendarSync:
                 notes.append(f"{day.date} {_sk(session)}: {e}")
             self.store.delete_reminder(day.date, session, TABLE)
         return notes
+
+
+def start_fallback(day: Day, settings: Settings, session: str) -> datetime:
+    """Keď sa z prevzatého eventu nedá prečítať začiatok, ber plánovaný čas fázy."""
+    return datetime.combine(day.date, hhmm_to_time(settings.session_time(session)))
 
 
 def _strip_mark(summary: str) -> str:

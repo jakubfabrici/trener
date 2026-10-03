@@ -29,18 +29,21 @@ def report_keyboard(can_undo: bool, can_goal: bool) -> InlineKeyboardMarkup | No
     if can_undo:
         row.append(InlineKeyboardButton("↩️ Vrátiť", callback_data="undo"))
     if can_goal:
-        row.append(InlineKeyboardButton("🎯 Bol to cieľ, nie kliky", callback_data="asgoal"))
+        row.append(InlineKeyboardButton("🎯 Bolo to X, nie kliky", callback_data="asgoal"))
     return InlineKeyboardMarkup([row]) if row else None
 
 
-GOAL_PRESETS = (6, 8, 10, 12, 14, 16, 20, 25, 30, 40)
+# Hodnoty X, nie denného cieľa: X = 9 znamená 18 ráno (a v po/st/pi aj 18 večer).
+X_PRESETS = (4, 5, 6, 7, 8, 9, 10, 12, 15, 20)
+GOAL_PRESETS = X_PRESETS          # starý názov pre spätnú kompatibilitu
+X_MIN, X_MAX = 1, 40
 
 
 def goal_keyboard(current: int) -> InlineKeyboardMarkup:
-    vals = sorted(set(GOAL_PRESETS) | {max(current - 2, 1), current, current + 2})
+    vals = sorted(set(X_PRESETS) | {max(current - 1, X_MIN), current, min(current + 1, X_MAX)})
     rows, row = [], []
     for v in vals:
-        row.append(InlineKeyboardButton(f"{'✅ ' if v == current else ''}{v}", callback_data=f"goal:{v}"))
+        row.append(InlineKeyboardButton(f"{'✅ ' if v == current else ''}{v}", callback_data=f"goal:{v}"))  # X
         if len(row) == 5:
             rows.append(row); row = []
     if row:
@@ -100,21 +103,22 @@ def register(app: Application, trainer, owner_chat_id: int) -> None:
 
     async def ciel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not ctx.args:
-            day = trainer.today_day()
-            await update.message.reply_text(trainer.goal_prompt(), reply_markup=goal_keyboard(day.goal))
+            s = trainer.settings()
+            x = s.x_for(trainer.today_day().date)
+            await update.message.reply_text(trainer.goal_prompt(), reply_markup=goal_keyboard(x))
             return
         n = _int_arg(ctx)
-        if n is None:
-            await update.message.reply_text(M.BAD_INT.format(cmd="ciel"))
+        if n is None or not (X_MIN <= n <= X_MAX):
+            await update.message.reply_text(M.BAD_X)
             return
-        await update.message.reply_text(await trainer.set_goal(n), reply_markup=keyboard(trainer.settings().frozen))
+        await update.message.reply_text(await trainer.set_x(n), reply_markup=keyboard(trainer.settings().frozen))
 
     async def prirastok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         n = _int_arg(ctx)
         if n is None:
             await update.message.reply_text(M.BAD_INT.format(cmd="prirastok"))
             return
-        await update.message.reply_text(await trainer.set_increment(n))
+        await update.message.reply_text(await trainer.set_x_step(n))
 
     async def rano(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         t = parse_hhmm(" ".join(ctx.args)) if ctx.args else None
@@ -200,7 +204,8 @@ def register(app: Application, trainer, owner_chat_id: int) -> None:
             text = trainer.goal_prompt()
             markup = goal_keyboard(trainer.today_day().goal)
         elif data.startswith("goal:") and data[5:].isdigit():
-            text = await trainer.set_goal(int(data[5:]))
+            n = int(data[5:])
+            text = await trainer.set_x(n) if X_MIN <= n <= X_MAX else M.BAD_X
         else:
             text = await trainer.status_text()
         if markup is None:
@@ -252,8 +257,8 @@ BOT_COMMANDS = [
     ("stav", "dnešok, streak, tabuľka, pripomienky"),
     ("zmraz", "pauza – nič nepripomínať"),
     ("odmraz", "pokračovať"),
-    ("ciel", "dnešný cieľ – tlačidlá alebo /ciel 10"),
-    ("prirastok", "rast cieľa po splnenom dni"),
+    ("ciel", "X plánu – tlačidlá alebo /ciel 9"),
+    ("prirastok", "o koľko rastie X každý pondelok"),
     ("rano", "ranný čas HH:MM"),
     ("vecer", "večerný čas HH:MM"),
     ("oprav", "/oprav ráno 5 – nastaví presnú hodnotu"),

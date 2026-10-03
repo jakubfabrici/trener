@@ -135,6 +135,19 @@ class ReminderSync:
                     out.notes.append(f"{_sk(session)}: prevzatá existujúca pripomienka {uid}")
                     break
 
+        # ── fáza, ktorú plán v tento deň nemá ─────────────────────────────
+        if today.session_target(session) <= 0:
+            if item is not None:
+                try:
+                    self.todos.delete(item)
+                    out.notes.append(f"{_sk(session)}: pripomienka zmazaná – "
+                                     f"{today.weekday_sk} túto fázu v pláne nemá")
+                except Exception as e:  # noqa: BLE001
+                    out.errors.append(f"{_sk(session)}: {e}")
+                    return
+            self.store.delete_reminder(today.date, session)
+            return
+
         # ── čo spravil používateľ od posledného syncu ─────────────────────
         if st.uid and item is None:
             # existovala a zmizla → používateľ ju zmazal; dnes ju nevnucujeme

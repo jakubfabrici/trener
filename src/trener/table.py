@@ -24,14 +24,19 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from trener.model import (DONE, FAILED, FROZEN, FROZEN_WORDS, OPEN, STATUS_LABEL, Day, Settings,
-                          parse_hhmm)
+from trener.model import (DONE, FAILED, FROZEN, FROZEN_WORDS, OPEN, REST, STATUS_LABEL, WEEKDAY_SK,
+                          Day, Settings, parse_hhmm, week_start, x_from_goal)
 
 SHEET_DAYS = "Kliky"
 SHEET_SETTINGS = "Nastavenia"
 SHEET_HELP = "Návod"
-DAY_HEADERS = ["Dátum", "Cieľ", "Ráno", "Večer", "Spolu", "Stav", "Streak", "Poznámka"]
-KEYS = ["date", "goal", "morning", "evening", "total", "status", "streak", "note"]
+# POZOR: nové stĺpce sa pridávajú NA KONIEC. DEFAULT_LAYOUT je záložné rozloženie pre
+# súbor bez čitateľnej hlavičky – vloženie stĺpca doprostred by v ňom ticho posunulo
+# všetky ostatné a bot by čítal Ráno ako Cieľ.
+DAY_HEADERS = ["Dátum", "Cieľ", "Ráno", "Večer", "Spolu", "Stav", "Streak", "Poznámka",
+               "Deň v týždni", "X (týždeň)"]
+KEYS = ["date", "goal", "morning", "evening", "total", "status", "streak", "note",
+        "weekday", "x"]
 HEADER_KEY = dict(zip(DAY_HEADERS, KEYS))
 DEFAULT_LAYOUT = {k: i + 1 for i, k in enumerate(KEYS)}      # 1-based
 COL = {h: i + 1 for i, h in enumerate(DAY_HEADERS)}          # spätná kompatibilita (testy)
@@ -40,7 +45,9 @@ USER_COLS = ("goal", "morning", "evening")
 # (kľúč v Settings, popisok v tabuľke, popis)
 SETTINGS_ROWS = [
     ("frozen", "Zamrazené", "ÁNO = tréner nič nepripomína (chat ani Pripomienky), tabuľku ďalej sleduje."),
-    ("increment", "Prírastok cieľa", "O koľko klikov rastie cieľ po každom splnenom dni (0 = nerastie)."),
+    ("x", "X (základ plánu)", "Ráno 2X každý deň okrem nedele; v pondelok, stredu a piatok aj večer 2X."),
+    ("x_since", "X platí od (pondelok)", "Pondelok týždňa, pre ktorý platí X vyššie. Staršie aj novšie týždne sa dopočítajú."),
+    ("x_step", "Rast X za týždeň", "O koľko sa X zvýši každý pondelok (0 = nerastie)."),
     ("morning_time", "Ranný čas", "Kedy príde ranná pripomienka a prvá výzva v chate (HH:MM)."),
     ("evening_time", "Večerný čas", "Kedy príde večerná pripomienka a prvá výzva v chate (HH:MM)."),
     ("nag_max", "Max výziev v chate", "Koľko výziev za sebou pošle bot v jednej fáze (ráno / večer)."),
@@ -50,16 +57,24 @@ SETTINGS_ROWS = [
     ("summary_on_fail", "Správa pri nesplnenom dni", "ÁNO = o polnoci príde jedna správa, ak deň nebol splnený."),
 ]
 LABEL_TO_KEY = {label: key for key, label, _ in SETTINGS_ROWS}
+# popisky, ktoré sme kedysi písali a už neplatia – pri zápise ich vyčistíme,
+# nech v hárku nevisí návod na niečo, čo bot nerobí
+OBSOLETE_SETTING_LABELS = {"Prírastok cieľa"}
 BOOL_KEYS = {"frozen", "summary_on_fail"}
-INT_KEYS = {"increment", "nag_max", "nag_interval_min"}
+INT_KEYS = {"x", "x_step", "nag_max", "nag_interval_min"}
+DATE_KEYS = {"x_since"}
 TIME_KEYS = {"morning_time", "evening_time"}
 
 HELP_TEXT = [
     "Virtuálny tréner klikov – ako funguje táto tabuľka",
     "",
+    "• Plán riadi jediné číslo X (hárok Nastavenia): pondelok, streda, piatok = ráno 2X + večer 2X;",
+    "  utorok, štvrtok, sobota = ráno 2X a večer nič; nedeľa = voľno. X rastie každý pondelok o „Rast X za týždeň“.",
     "• Hárok „Kliky“: jeden riadok = jeden deň. Do stĺpcov Cieľ, Ráno, Večer a Poznámka môžeš písať ty aj bot.",
+    "• Stĺpce Deň a X sú len na pozeranie – ukazujú, z akého X sa cieľ toho dňa počítal.",
     "• Ráno = počet klikov, ktoré si dal v rannej fáze, Večer = vo večernej. Spolu, Stav a Streak počíta bot.",
-    "• Deň je splnený, keď Ráno + Večer ≥ Cieľ. Rozdelenie cieľa je polovica ráno (zaokrúhlená nahor) a zvyšok večer.",
+    "• Deň je splnený, keď Ráno + Večer ≥ Cieľ. Cieľ prepíšeš aj ručne – čo napíšeš ty, to platí pre ten deň.",
+    "• Streak = počet celých splnených týždňov za sebou (pondelok–nedeľa). Nedeľa je voľno, netreba v nej nič.",
     "• Ak do stĺpca Stav napíšeš „zamrazený“, deň sa nepočíta a neprerušuje streak (napr. choroba).",
     "• Bot číta tabuľku každé 2 minúty. Čo zapíšeš sem, platí – nemusíš mu nič písať do chatu.",
     "• Stĺpce môžeš presúvať a pridávať vlastné (bot ich hľadá podľa názvu v prvom riadku a cudzie nechá tak).",
@@ -92,6 +107,8 @@ class RowVals:
     extra: dict[int, object] = field(default_factory=dict) # cudzie stĺpce (index → hodnota)
     row: int = 0                                           # riadok v hárku
     total_text: str = ""
+    weekday_text: str = ""      # stĺpec „Deň v týždni“ – vlastní ho bot, iba ho kontrolujeme
+    x_value: int | None = None  # stĺpec „X (týždeň)“ – to isté
 
 
 @dataclass
@@ -104,6 +121,9 @@ class Parsed:
     layout: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_LAYOUT))
     max_row: int = 1
     foreign_rows: int = 0           # riadky, ktorým nerozumieme (nechávame ich tak)
+    settings_normalized: set = field(default_factory=set)
+    """Kľúče, ktoré sme pri čítaní museli upraviť (napr. dátum zarovnaný na pondelok).
+    Hodnota v hárku sa líši od tej, s ktorou bot pracuje – treba ju prepísať späť."""
 
 
 # ── konverzie buniek ─────────────────────────────────────────────────────────
@@ -216,6 +236,7 @@ def parse_workbook(data: bytes) -> Parsed:
     except Exception as e:  # noqa: BLE001 – openpyxl vie hodiť všeličo pri rozpísanom súbore
         raise TableCorrupt(f"xlsx sa nedá načítať: {e}") from e
     warnings: list[str] = []
+    normalized: set[str] = set()
     days: dict[date, RowVals] = {}
     layout = dict(DEFAULT_LAYOUT)
     max_row = 1
@@ -258,9 +279,12 @@ def parse_workbook(data: bytes) -> Parsed:
             note = ws_v.cell(r, layout["note"]).value if "note" in layout else None
             extra = {c: ws_f.cell(r, c).value for c in range(1, ws_v.max_column + 1)
                      if c not in known_cols and ws_f.cell(r, c).value is not None}
+            wv = ws_v.cell(r, layout["weekday"]).value if "weekday" in layout else None
+            xv = ws_v.cell(r, layout["x"]).value if "x" in layout else None
             days[d] = RowVals(d, vals["goal"], vals["morning"], vals["evening"],
                               "" if note is None else str(note), status_text, _is_frozen_text(status_text),
-                              formulas, extra, r, total_text)
+                              formulas, extra, r, total_text,
+                              "" if wv is None else str(wv).strip(), cell_int(xv))
     settings: dict[str, object] = {}
     has_settings = SHEET_SETTINGS in wb_v.sheetnames
     if has_settings:
@@ -274,20 +298,28 @@ def parse_workbook(data: bytes) -> Parsed:
                 continue
             v = ws.cell(r, 2).value
             parsed = _parse_setting(key, v)
+            if parsed is not None and key in DATE_KEYS and str(parsed) != str(cell_date(v) or ""):
+                normalized.add(key)      # zadal iný deň než pondelok – prepíšeme mu bunku
             if parsed is None:
                 if v not in (None, ""):
                     warnings.append(f"Nastavenia „{label}“: nerozumiem hodnote {v!r}")
                 continue
             settings[key] = parsed
-    return Parsed(days, settings, warnings, has_days, has_settings, layout, max_row, foreign)
+    return Parsed(days, settings, warnings, has_days, has_settings, layout, max_row, foreign,
+                  normalized)
 
 
 def _parse_setting(key: str, v):
+    if key in DATE_KEYS:
+        return cell_monday(v)
     if key in BOOL_KEYS:
         return cell_bool(v)
     if key in INT_KEYS:
         n = cell_int(v)
-        return n if n is not None and n >= 0 else None
+        if n is None:
+            return None
+        low = 1 if key == "x" else 0      # X = 0 by z celého plánu spravilo voľno
+        return n if n >= low else None
     if key in TIME_KEYS:
         return cell_time(v)
     if v is None:
@@ -310,7 +342,7 @@ class MergeResult:
 
 
 def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_settings: Settings,
-          settings_synced: dict[str, str | None], today: date, default_goal: int = 10) -> MergeResult:
+          settings_synced: dict[str, str | None], today: date) -> MergeResult:
     """3-cestný merge: (tabuľka, bot, posledná zosynchronizovaná snímka).
 
     Pre každé pole: zmena v tabuľke voči snímke → vyhráva tabuľka; inak zmena bota → do tabuľky.
@@ -322,21 +354,17 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
     deleted: list[date] = []
     to_table = False
     result: dict[date, Day] = {}
+    # Nastavenia riešime PRED dňami: keď v tabuľke zmeníš X, ciele sa majú prepočítať
+    # hneď v tomto kole, nie až o tick neskôr.
+    settings, changed_settings, set_notes, set_to_table = _merge_settings(
+        parsed, bot_settings, settings_synced)
+    from_table.extend(set_notes)
+    to_table = to_table or set_to_table
     trows = parsed.days if parsed else {}
     bot_by_date = {d.date: (d, s) for d, s in bot_days}
     table_has_rows = bool(trows)
     all_dates = sorted(set(trows) | set(bot_by_date))
 
-    def prev_goal(d: date) -> int:
-        for x in reversed(all_dates):
-            if x < d:
-                src = result.get(x) or (bot_by_date.get(x) or (None,))[0]
-                if src is not None and src.goal > 0:
-                    return src.goal
-                tv = trows.get(x)
-                if tv is not None and tv.goal:
-                    return tv.goal
-        return default_goal
 
     for d in all_dates:
         t = trows.get(d)
@@ -350,7 +378,9 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
             to_table = True                    # v tabuľke chýba → dopíšeme
             continue
         if bot is None and t is not None:
-            goal = t.goal if t.goal else prev_goal(d)     # bez cieľa → posledný známy cieľ, nie 0
+            # Prázdna bunka = nezadané → cieľ z plánu. Napísaná 0 je poctivá nula
+            # (voľný deň), nesmie sa „opraviť“ na cieľ predošlého dňa.
+            goal = t.goal if t.goal is not None else settings.goal_for(d)
             day = Day(d, goal, t.morning or 0, t.evening or 0, t.frozen_by_user, t.note)
             result[d] = day
             from_table.append(f"{d.day}.{d.month}.: nový riadok {day.morning}+{day.evening}/{day.goal}")
@@ -397,7 +427,7 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
                 new = new.copy(frozen=True)
                 from_table.append(f"{d.day}.{d.month}.: zamrazený (tabuľka)")
         elif not t.frozen_by_user and bot.frozen and synced is not None and synced.frozen \
-                and t.status_text and not new.done:
+                and t.status_text and not new.done and not new.is_rest:
             new = new.copy(frozen=False)
             from_table.append(f"{d.day}.{d.month}.: odmrazený (tabuľka)")
             row_to_table = True
@@ -410,11 +440,25 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
         if row_to_table or _computed_stale(t, new, today):
             to_table = True
 
-    # nastavenia
+    if parsed is None or not parsed.has_days_sheet or not parsed.has_settings_sheet:
+        to_table = True
+    elif any(k not in parsed.layout for k in KEYS):
+        to_table = True       # v hárku chýba stĺpec (napr. X po aktualizácii) → dopíšeme ho
+    elif not to_table and _bot_columns_stale(trows, result, settings):
+        to_table = True       # Deň v týždni / X v hárku nesedí – tieto stĺpce vlastní bot
+    return MergeResult(sorted(result.values(), key=lambda x: x.date), settings, from_table,
+                       to_table, changed_days, changed_settings, deleted)
+
+
+def _merge_settings(parsed: Parsed | None, bot_settings: Settings,
+                    settings_synced: dict[str, str | None]):
+    """Nastavenia z 3-cestného merge. Vracia (settings, zmenené, poznámky, treba_zapísať)."""
     settings = bot_settings.copy()
-    changed_settings: list[str] = []
+    changed: list[str] = []
+    notes: list[str] = []
+    to_table = False
     tset = parsed.settings if parsed else {}
-    for key, _label, _ in SETTINGS_ROWS:
+    for key, label, _ in SETTINGS_ROWS:
         bv = getattr(bot_settings, key)
         sv_raw = settings_synced.get(key)
         sv = _from_snapshot(key, sv_raw) if sv_raw is not None else None
@@ -423,16 +467,15 @@ def merge(parsed: Parsed | None, bot_days: list[tuple[Day, Day | None]], bot_set
             if sv is None or tv != sv:
                 if tv != bv:
                     setattr(settings, key, tv)
-                    changed_settings.append(key)
-                    from_table.append(f"nastavenie {_label}: {bv} → {tv} (tabuľka)")
+                    changed.append(key)
+                    notes.append(f"nastavenie {label}: {bv} → {tv} (tabuľka)")
             elif bv != sv:
                 to_table = True
         else:
             to_table = True   # v tabuľke chýba → dopíšeme
-    if parsed is None or not parsed.has_days_sheet or not parsed.has_settings_sheet:
-        to_table = True
-    return MergeResult(sorted(result.values(), key=lambda x: x.date), settings, from_table,
-                       to_table, changed_days, changed_settings, deleted)
+    if parsed is not None and parsed.settings_normalized:
+        to_table = True       # hodnotu sme upravili (dátum na pondelok) → nech to vidno
+    return settings, changed, notes, to_table
 
 
 def _sk(name: str) -> str:
@@ -450,9 +493,33 @@ def _from_snapshot(key: str, s: str):
     return s
 
 
+def _bot_columns_stale(trows: dict[date, RowVals], result: dict[date, Day],
+                       settings: Settings) -> bool:
+    """Sedia v hárku stĺpce, ktoré počíta bot (Deň v týždni, X)?
+
+    Bez tejto kontroly by sa raz zapísaná hodnota nikdy neopravila – ani po zmene X,
+    ani keď ju niekto prepíše. Zvyšné dopočítané stĺpce stráži `_computed_stale`.
+    """
+    if not trows:
+        return False
+    xs = week_x_map(list(result.values()), settings)
+    for d, day in result.items():
+        t = trows.get(d)
+        if t is None:
+            continue
+        if t.weekday_text and t.weekday_text != WEEKDAY_SK[d.weekday()]:
+            return True
+        ocakavane = xs.get(week_start(d)) or settings.x_for(d)
+        if t.x_value is not None and t.x_value != ocakavane:
+            return True
+    return False
+
+
 def _computed_stale(t: RowVals, day: Day, today: date) -> bool:
     if t.status_text.strip() != STATUS_LABEL[day.status(today)]:
         return True
+    if t.goal is not None and t.goal != day.goal and "goal" not in t.formula_cells:
+        return True            # zmenil sa plán → prepíš cieľ aj v histórii
     return cell_int(t.total_text) != day.total
 
 
@@ -460,7 +527,39 @@ def _computed_stale(t: RowVals, day: Day, today: date) -> bool:
 
 HEADER_FILL = PatternFill("solid", fgColor="DDEBF7")
 BOT_FILL = PatternFill("solid", fgColor="F2F2F2")
-STATUS_FILL = {DONE: "E2F0D9", FAILED: "FBE5D6", FROZEN: "DEEBF7", OPEN: "FFF2CC"}
+STATUS_FILL = {DONE: "E2F0D9", FAILED: "FBE5D6", FROZEN: "DEEBF7", OPEN: "FFF2CC", REST: "EDEDED"}
+
+
+def week_x_map(days: list[Day], settings: Settings) -> dict[date, int]:
+    """X pre každý týždeň, odvodené z cieľov, ktoré v tom týždni naozaj sú.
+
+    Stĺpec „X (týždeň)“ tak hovorí o tom týždni a nie o dnešných nastaveniach –
+    po zmene X sa história spätne nepreznačí. Nedeľa (cieľ 0) X neprezradí, preto
+    sa berie z ostatných dní toho istého týždňa; keď ho nemá odkiaľ vziať žiadny,
+    padne to na plán.
+    """
+    hlasy: dict[date, list[int]] = {}
+    for d in days:
+        x = x_from_goal(d.goal, d.date)
+        if x is not None:
+            hlasy.setdefault(week_start(d.date), []).append(x)
+    out: dict[date, int] = {}
+    for wk, xs in hlasy.items():
+        najcastejsie = max(xs, key=lambda v: (xs.count(v), v))
+        # Odvodené X berieme, len keď sa týždeň zhodne. Staré riadky spred plánu
+        # (každý deň iný cieľ) by inak vyrobili náhodné číslo – tam radšej nič
+        # a volajúci si vezme X z nastavení.
+        if xs.count(najcastejsie) >= 2 and xs.count(najcastejsie) * 2 >= len(xs):
+            out[wk] = najcastejsie
+    return out
+
+
+def cell_monday(v) -> str | None:
+    """Dátum z bunky (aj ako text) zarovnaný na pondelok jeho týždňa, ISO formát."""
+    d = cell_date(v)
+    if d is None:
+        return None
+    return week_start(d).isoformat()
 
 
 def _set_text(cell, value) -> None:
@@ -510,6 +609,7 @@ def render_workbook(existing: bytes | None, days: list[Day], settings: Settings,
         cell.fill = HEADER_FILL
         cell.alignment = Alignment(horizontal="center")
 
+    x_tyzdne = week_x_map(days, settings)
     rows_by_date = {d: rv.row for d, rv in (parsed.days.items() if parsed else [])}
     formula_by_date = {d: rv.formula_cells for d, rv in (parsed.days.items() if parsed else [])}
     next_row = max([1, ws.max_row] + list(rows_by_date.values())) + 1
@@ -529,6 +629,9 @@ def render_workbook(existing: bytes | None, days: list[Day], settings: Settings,
             cell = ws.cell(r, layout[key])
             if cell.value != value:
                 cell.value = value
+        ws.cell(r, layout["weekday"], WEEKDAY_SK[day.date.weekday()]).fill = BOT_FILL
+        wk = week_start(day.date)
+        ws.cell(r, layout["x"], x_tyzdne.get(wk) or settings.x_for(day.date)).fill = BOT_FILL
         ws.cell(r, layout["total"], day.total).fill = BOT_FILL
         c = ws.cell(r, layout["status"], STATUS_LABEL[st])
         c.fill = PatternFill("solid", fgColor=STATUS_FILL[st])
@@ -537,7 +640,8 @@ def render_workbook(existing: bytes | None, days: list[Day], settings: Settings,
         for col, v in (extras or {}).get(day.date, {}).items():
             ws.cell(r, col, v)
     if fresh:
-        widths = {"date": 12, "goal": 7, "morning": 7, "evening": 7, "total": 7, "status": 14, "streak": 8, "note": 40}
+        widths = {"date": 12, "weekday": 11, "x": 5, "goal": 7, "morning": 7, "evening": 7,
+                  "total": 7, "status": 14, "streak": 8, "note": 40}
         for key, w in widths.items():
             ws.column_dimensions[ws.cell(1, layout[key]).column_letter].width = w
         ws.freeze_panes = "A2"
@@ -576,16 +680,24 @@ def render_workbook(existing: bytes | None, days: list[Day], settings: Settings,
             else:
                 cell.value = v
         wss.cell(r, 3, desc)
+    for label in OBSOLETE_SETTING_LABELS:
+        r = label_rows.get(label)
+        if r is not None:
+            for c in (1, 2, 3):
+                wss.cell(r, c).value = None
     wss.column_dimensions["A"].width = 30
     wss.column_dimensions["B"].width = 26
     wss.column_dimensions["C"].width = 90
 
     # návod
     wsh = wb[SHEET_HELP] if SHEET_HELP in wb.sheetnames else wb.create_sheet(SHEET_HELP)
+    stary_koniec = wsh.max_row
     for i, line in enumerate(HELP_TEXT, 1):
         c = wsh.cell(i, 1, line)
         if i == 1:
             c.font = Font(bold=True, size=13)
+    for i in range(len(HELP_TEXT) + 1, stary_koniec + 1):
+        wsh.cell(i, 1).value = None      # starý, dlhší návod nesmie visieť pod novým
     wsh.column_dimensions["A"].width = 120
 
     buf = io.BytesIO()

@@ -6,16 +6,51 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from trener.model import Day, Settings
-from trener.table import (SHEET_DAYS, SHEET_SETTINGS, TableCorrupt, cell_date, cell_int, merge,
-                          parse_workbook, render_workbook)
+from trener.table import (DAY_HEADERS, SETTINGS_ROWS, SHEET_DAYS, SHEET_SETTINGS, RowVals,
+                          TableCorrupt, cell_date, cell_int, merge, parse_workbook, render_workbook)
 
-D = date(2026, 9, 2)
-Y = date(2026, 9, 1)
+D = date(2026, 9, 2)          # streda – ráno aj večer (2X + 2X)
+Y = date(2026, 9, 1)          # utorok – len ráno (2X)
+NE = date(2026, 9, 6)         # nedeľa – voľno (cieľ 0)
+# Settings() má x=8 od pondelka 7.9.2026 → pre týždeň 31.8. platí X = 7, streda = 28.
+GOAL_D = Settings().goal_for(D)
 
 
 def render(days, settings=Settings(), existing=None, today=D, parsed=None):
     streaks = {d.date: 0 for d in days}
     return render_workbook(existing, days, settings, streaks, today, parsed)
+
+
+def _snap(s: Settings) -> dict:
+    """Snímka nastavení tak, ako ju drží store (všetko ako text)."""
+    return {k: ("1" if v is True else "0" if v is False else str(v)) for k, v in vars(s).items()}
+
+
+def _row(d, goal=None, morning=None, evening=None, note="", status_text="", row=99) -> RowVals:
+    """Riadok tak, ako by ho do tabuľky napísal používateľ."""
+    return RowVals(d, goal, morning, evening, note, status_text, False, set(), {}, row, "")
+
+
+def _old_table(data: bytes) -> bytes:
+    """Tabuľka spred zavedenia plánu X: bez stĺpcov „Deň v týždni“ a „X (týždeň)“."""
+    wb = load_workbook(io.BytesIO(data))
+    wb[SHEET_DAYS].delete_cols(len(DAY_HEADERS) - 1, 2)
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
+
+
+def _set_setting(data: bytes, label: str, value) -> bytes:
+    """Prepíše hodnotu v hárku Nastavenia tak, ako keby ju zmenil používateľ v Exceli."""
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb[SHEET_SETTINGS]
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(r, 1).value == label:
+            ws.cell(r, 2, value)
+            break
+    else:
+        raise AssertionError(f"v hárku Nastavenia nie je riadok {label!r}")
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
 
 
 def test_round_trip():
@@ -189,12 +224,19 @@ def test_deleted_row_is_deleted_from_bot_but_not_when_table_emptied():
     assert merge(p3, [(a, a), (b, b)], Settings(), {}, D).deleted_days == []
 
 
-def test_new_row_without_goal_inherits_previous_goal():
-    a = Day(Y, 12, 6, 6)
+def test_new_row_without_goal_takes_goal_from_plan():
+    """Prázdny Cieľ v novom riadku sa doplní z PLÁNU (X pre ten týždeň), nie z predošlého dňa."""
+    a = Day(Y, 12, 6, 6)                       # utorok s ručne nastaveným cieľom 12
     p = parse_workbook(render([a]))
-    p.days[D] = type(p.days[Y])(D, None, 3, 0, "", "", False, set(), {}, 3, "")
-    m = merge(p, [(a, a)], Settings(), {}, D, default_goal=10)
-    assert m.days[1].goal == 12 and m.days[1].status(D) == "open"
+    p.days[D] = _row(D, goal=None, morning=3, row=3)
+    m = merge(p, [(a, a)], Settings(), {}, D)
+    assert m.days[1].goal == GOAL_D == 28 and m.days[1].goal != a.goal
+    assert m.days[1].status(D) == "open"
+    # a nedeľný riadok bez cieľa vyjde z plánu ako voľno, nie ako kópia stredy
+    p2 = parse_workbook(render([a]))
+    p2.days[NE] = _row(NE, goal=None, row=3)
+    m2 = merge(p2, [(a, a)], Settings(), {}, D)
+    assert m2.days[1].goal == 0 and m2.days[1].is_rest
 
 
 def test_note_starting_with_equals_is_text_and_dv_not_duplicated():
@@ -273,3 +315,188 @@ def test_no_write_churn_with_zero_totals_today():
     p = parse_workbook(data)
     m = merge(p, [(day, day)], s, synced_settings, D)
     assert not m.to_table, m
+
+
+# ── nový model plánu: voľno, stĺpce Deň/X, X v Nastaveniach ──────────────────
+
+def test_rest_day_row_renders_with_volno_status():
+    """Nedeľa (cieľ 0) sa vykreslí ako „🌙 voľno“ – kedysi tu STATUS_FILL padol na KeyError."""
+    data = render([Day(NE, 0, 0, 0)])
+    ws = load_workbook(io.BytesIO(data))[SHEET_DAYS]
+    assert ws.cell(2, 6).value == "🌙 voľno"
+    assert ws.cell(2, 6).fill.fgColor.rgb.endswith("EDEDED")          # vlastná farba voľna
+    assert ws.cell(2, 2).value == 0 and ws.cell(2, 5).value == 0
+    assert ws.cell(2, 9).value == "nedeľa" and ws.cell(2, 10).value == 7
+    p = parse_workbook(data)
+    assert p.days[NE].goal == 0 and p.days[NE].status_text == "🌙 voľno"
+    assert not p.days[NE].frozen_by_user                              # „voľno“ nie je „zamrazený“
+
+
+def test_weekday_and_x_columns_show_the_plan():
+    """Stĺpce Deň v týždni a X (týždeň) sedia na plán: 2X+2X v stredu, 2X v utorok, 0 v nedeľu."""
+    days = [Day(Y, 14, 0, 0), Day(D, 28, 0, 0), Day(NE, 0, 0, 0)]
+    ws = load_workbook(io.BytesIO(render(days)))[SHEET_DAYS]
+    assert [ws.cell(r, 9).value for r in (2, 3, 4)] == ["utorok", "streda", "nedeľa"]
+    assert [ws.cell(r, 10).value for r in (2, 3, 4)] == [7, 7, 7]
+    assert [ws.cell(r, 2).value for r in (2, 3, 4)] == [14, 28, 0]
+
+
+def test_missing_weekday_and_x_columns_are_added_to_old_table():
+    """Stará tabuľka bez nových stĺpcov: merge si vypýta zápis a render ich dopíše na koniec."""
+    bot = Day(D, 28, 2, 0)
+    s = Settings()
+    old = _old_table(render([bot], s))
+    p = parse_workbook(old)
+    assert "weekday" not in p.layout and "x" not in p.layout and not p.warnings
+    m = merge(p, _synced(bot), s, _snap(s), D)
+    # nič iné sa nezmenilo – zápis je vynútený práve chýbajúcimi stĺpcami
+    assert m.to_table and not m.changed_days and not m.changed_settings and not m.from_table
+    ws = load_workbook(io.BytesIO(render([bot], s, existing=old, parsed=p)))[SHEET_DAYS]
+    assert [ws.cell(1, c).value for c in (9, 10)] == ["Deň v týždni", "X (týždeň)"]
+    assert ws.cell(2, 9).value == "streda" and ws.cell(2, 10).value == 7
+    assert ws.cell(2, 3).value == 2                                   # pôvodné dáta ostali na mieste
+
+
+def test_x_change_in_settings_sheet_wins_and_is_not_pushed_back():
+    """Zmena X v hárku vyhráva nad botom a bot svoje staré X neposiela späť do tabuľky."""
+    bot = Day(D, 28, 0, 0)
+    s = Settings()
+    p = parse_workbook(_set_setting(render([bot], s), "X (základ plánu)", 5))
+    assert p.settings["x"] == 5
+    m = merge(p, _synced(bot), s, _snap(s), D)
+    assert m.settings.x == 5 and m.changed_settings == ["x"]
+    assert any("X (základ plánu): 8 → 5" in n for n in m.from_table)
+    assert m.settings.goal_for(D) == 16                               # nový plán: 2·4 + 2·4
+    # Zápis späť do hárku JE potrebný, ale nie kvôli X v Nastaveniach (to vyhralo),
+    # lež kvôli stĺpcu „X (týždeň)“, ktorý po zmene plánu ukazuje staré číslo.
+    assert m.to_table
+    assert _set_setting(render(m.days, m.settings), "X (základ plánu)", 5) is not None
+    znovu = parse_workbook(render(m.days, m.settings))
+    assert znovu.settings["x"] == 5                                   # bot nevrátil svoju 8
+
+
+def test_x_zero_in_sheet_is_rejected_and_bot_value_restored():
+    """X = 0 (ani záporné) sa neprevezme – celý plán by sa zmenil na voľno."""
+    bot = Day(D, 28, 0, 0)
+    s = Settings()
+    for bad in (0, -3):
+        p = parse_workbook(_set_setting(render([bot], s), "X (základ plánu)", bad))
+        assert "x" not in p.settings and any("X (základ plánu)" in w for w in p.warnings)
+        m = merge(p, _synced(bot), s, _snap(s), D)
+        assert m.settings.x == 8 and not m.changed_settings
+        assert m.to_table                                             # botovo X sa vráti do hárku
+    # X = 1 je ešte platné
+    p1 = parse_workbook(_set_setting(render([bot], s), "X (základ plánu)", 1))
+    assert p1.settings["x"] == 1 and not p1.warnings
+
+
+def test_x_since_is_snapped_to_monday():
+    """„X platí od“ zadané na hocijaký deň sa zarovná na pondelok jeho týždňa."""
+    bot = Day(D, 28, 0, 0)
+    s = Settings()
+    p = parse_workbook(_set_setting(render([bot], s), "X platí od (pondelok)", "2026-09-02"))
+    assert p.settings["x_since"] == "2026-08-31"
+    m = merge(p, _synced(bot), s, _snap(s), D)
+    assert m.settings.x_since == "2026-08-31" and m.changed_settings == ["x_since"]
+    assert m.settings.x_for(D) == 8 and m.settings.goal_for(D) == 32   # X 8 už platí pre tento týždeň
+    # nezmyselný dátum sa odmietne a bot si nechá svoj
+    p2 = parse_workbook(_set_setting(render([bot], s), "X platí od (pondelok)", "blabla"))
+    assert "x_since" not in p2.settings and p2.warnings
+    assert merge(p2, _synced(bot), s, _snap(s), D).settings.x_since == s.x_since
+
+
+def test_user_zero_goal_is_respected_as_rest_day():
+    """Nula napísaná používateľom je poctivé voľno – nesmie sa „opraviť“ podľa plánu."""
+    bot = Day(D, 28, 0, 0)
+    p = parse_workbook(render([bot]))
+    p.days[D].goal = 0                                  # dnes si dávam voľno
+    m = merge(p, _synced(bot), Settings(), {}, D)
+    assert m.days[0].goal == 0 and m.days[0].is_rest and m.days[0].status(D) == "rest"
+    assert any("cieľ 28 → 0" in n for n in m.from_table)
+    # to isté pri úplne novom riadku (nedeľa, ktorú bot ešte nepozná)
+    p2 = parse_workbook(render([bot]))
+    p2.days[NE] = _row(NE, goal=0, row=3)
+    m2 = merge(p2, _synced(bot), Settings(), {}, D)
+    assert [(d.date, d.goal) for d in m2.days] == [(D, 28), (NE, 0)]
+
+
+def test_frozen_rest_day_is_not_unfrozen_by_its_own_volno_status():
+    """Zamrazená nedeľa: v Stave svieti „🌙 voľno“ (náš zápis) – to nie je odmrazenie od používateľa."""
+    sunday = Day(NE, 0, 0, 0, frozen=True)
+    p = parse_workbook(render([sunday]))
+    assert p.days[NE].status_text == "🌙 voľno" and not p.days[NE].frozen_by_user
+    m = merge(p, _synced(sunday), Settings(), {}, D)
+    assert m.days[0].frozen is True
+    assert not m.to_table and not m.changed_days                      # ani žiadne zbytočné prepisovanie
+    # kontrast: zamrazený tréningový deň má v Stave „❄️ zamrazený“ a ten sa prečíta späť
+    training = Day(D, 28, 0, 0, frozen=True)
+    p2 = parse_workbook(render([training]))
+    assert p2.days[D].status_text.startswith("❄️") and p2.days[D].frozen_by_user
+
+
+def test_user_column_named_x_is_not_adopted_by_bot():
+    """Používateľov stĺpec „X“ nie je náš „X (týždeň)“ – bot si ho nesmie privlastniť."""
+    bot = Day(D, 28, 2, 0)
+    s = Settings()
+    old = _old_table(render([bot], s))
+    wb = load_workbook(io.BytesIO(old)); ws = wb[SHEET_DAYS]
+    ws.cell(1, 9, "X"); ws.cell(2, 9, "moje X")
+    buf = io.BytesIO(); wb.save(buf)
+    p = parse_workbook(buf.getvalue())
+    assert "x" not in p.layout and p.days[D].extra == {9: "moje X"}
+    ws2 = load_workbook(io.BytesIO(render([bot], s, existing=buf.getvalue(), parsed=p)))[SHEET_DAYS]
+    assert ws2.cell(1, 9).value == "X" and ws2.cell(2, 9).value == "moje X"
+    assert [ws2.cell(1, c).value for c in (10, 11)] == ["Deň v týždni", "X (týždeň)"]
+    assert ws2.cell(2, 10).value == "streda" and ws2.cell(2, 11).value == 7
+
+
+def test_foreign_columns_rows_and_formulas_survive_added_columns():
+    """Doplnenie nových stĺpcov nesmie rozhádzať cudzie stĺpce, cudzie riadky ani vzorce."""
+    bot = Day(D, 28, 0, 0)
+    s = Settings()
+    old = _old_table(render([bot], s))
+    wb = load_workbook(io.BytesIO(old)); ws = wb[SHEET_DAYS]
+    ws.cell(2, 3, "=2+3")                                    # vzorec v Ráno
+    ws.cell(1, 9, "Nálada"); ws.cell(2, 9, "super")          # vlastný stĺpec
+    ws.cell(3, 1, "poznámka pod tabuľkou")                   # cudzí riadok
+    buf = io.BytesIO(); wb.save(buf)
+    p = parse_workbook(buf.getvalue())
+    assert "morning" in p.days[D].formula_cells and p.foreign_rows == 1
+    data = render([Day(D, 28, 5, 0), Day(NE, 0)], s, existing=buf.getvalue(), parsed=p)
+    ws2 = load_workbook(io.BytesIO(data))[SHEET_DAYS]
+    assert ws2.cell(2, 3).value == "=2+3"                    # vzorec nikdy neprepisujeme
+    assert ws2.cell(2, 9).value == "super" and ws2.cell(1, 9).value == "Nálada"
+    assert ws2.cell(3, 1).value == "poznámka pod tabuľkou"
+    assert [ws2.cell(1, c).value for c in (10, 11)] == ["Deň v týždni", "X (týždeň)"]
+    assert cell_date(ws2.cell(4, 1).value) == NE and ws2.cell(4, 6).value == "🌙 voľno"
+    assert ws2.cell(4, 10).value == "nedeľa" and ws2.cell(4, 11).value == 7
+
+
+def test_obsolete_increment_row_is_replaced_by_x_rows():
+    """Migrácia starého hárku: „Prírastok cieľa“ zmizne, pribudnú tri riadky o X."""
+    bot = Day(D, 28, 0, 0)
+    s = Settings()
+    wb = load_workbook(io.BytesIO(render([bot], s)))
+    wss = wb[SHEET_SETTINGS]
+    wss.delete_rows(3, 3)                                    # staré hárky riadky o X nemali
+    wss.insert_rows(3)
+    wss.cell(3, 1, "Prírastok cieľa"); wss.cell(3, 2, 2)
+    buf = io.BytesIO(); wb.save(buf)
+    p = parse_workbook(buf.getvalue())
+    assert "x" not in p.settings and not p.warnings           # neznámy riadok ticho ignorujeme
+    m = merge(p, _synced(bot), s, _snap(s), D)
+    assert m.to_table and m.settings.x == 8 and not m.changed_settings
+    wss2 = load_workbook(io.BytesIO(render([bot], s, existing=buf.getvalue(), parsed=p)))[SHEET_SETTINGS]
+    vals = {wss2.cell(r, 1).value: wss2.cell(r, 2).value for r in range(2, wss2.max_row + 1)}
+    assert "Prírastok cieľa" not in vals
+    assert vals["X (základ plánu)"] == 8 and vals["X platí od (pondelok)"] == "2026-09-07"
+    assert vals["Rast X za týždeň"] == 1
+
+
+def test_headers_and_settings_rows_follow_the_x_model():
+    """Nové stĺpce sa pridávajú NA KONIEC a nastavenia poznajú X namiesto prírastku."""
+    assert DAY_HEADERS[:8] == ["Dátum", "Cieľ", "Ráno", "Večer", "Spolu", "Stav", "Streak", "Poznámka"]
+    assert DAY_HEADERS[8:] == ["Deň v týždni", "X (týždeň)"]
+    keys = [k for k, _, _ in SETTINGS_ROWS]
+    assert "increment" not in keys and {"x", "x_since", "x_step"} <= set(keys)
+    assert not hasattr(Settings(), "increment")

@@ -6,9 +6,23 @@ ako jediný zdroj pravdy. Beží v samostatnom LXC kontajneri na Proxmoxe (`tren
 
 ## Ako to funguje
 
-- **Deň má dve fázy**: ráno a večer. Cieľ sa delí na polovice (10 → 5 + 5, 11 → 6 + 5).
-  Deň je splnený, keď ráno + večer ≥ cieľ. Po splnenom dni cieľ rastie o *prírastok*
-  (default 2), po nesplnenom ostáva rovnaký (žiadne tresty).
+- **Týždenný plán riadi jediné číslo X** (počet klikov v jednej sérii):
+
+  | deň | ráno | večer | spolu |
+  |---|---|---|---|
+  | pondelok, streda, piatok | 2X | 2X | 4X |
+  | utorok, štvrtok, sobota | 2X | – | 2X |
+  | nedeľa | – | – | voľno |
+
+  **X rastie každý pondelok o 1**, bez ohľadu na to, ako týždeň dopadol (`/prirastok N`
+  zmení o koľko). Cieľ dňa sa teda nepočíta z včerajška, ale z dátumu – plán platí aj
+  pre dni, ktoré bot zmeškal, aj pre budúcnosť. Deň je splnený, keď ráno + večer ≥ cieľ.
+- **Streak = počet celých splnených týždňov** (pondelok–nedeľa) za sebou. Týždeň je
+  splnený, keď si zvládol všetky tréningové dni; nedeľa je voľno a netreba v nej nič.
+  Zamrazené dni týždeň nezhodia.
+- **Voľná fáza je úplne ticho**: v nedeľu a vo večeroch utorka, štvrtka a soboty
+  nepríde výzva v chate, nevytvorí sa udalosť v kalendári ani pripomienka – a čo tam
+  zostalo po starom pláne, bot zmaže.
 - **Budík v kalendári (Apple Kalendár, zoznam „Kliky“)**: bot každý deň vytvorí dva
   eventy – ranný o `morning_time` a večerný o `evening_time`, každý s **piatimi
   upozorneniami** (v čase eventu a potom +3, +7, +12 a +20 minút), takže zvoní znova,
@@ -35,9 +49,10 @@ ako jediný zdroj pravdy. Beží v samostatnom LXC kontajneri na Proxmoxe (`tren
   (dve série po päť = 10), „-2“ / „uber 2“ (oprava dole), „spolu 10“ (dnešný súčet má byť 10),
   „včera večer 5“ (dopísať včerajšok) fungujú tiež; „ráno = 5“ alebo `/oprav ráno 5` nastaví
   presnú hodnotu. Viac čísel bez určenia fázy („3. séria 5“) bot radšej odmietne, než by
-  hádal. Číslo **nikdy** nemení nastavenia (to bola chyba v1) – cieľ sa mení cez `/ciel`
-  (tlačidlá s hodnotami) alebo `/ciel 10`. Pod každým hlásením sú tlačidlá **↩️ Vrátiť**
-  a **🎯 Bol to cieľ, nie kliky**, keby si sa pomýlil. Odpoveď je v riadkoch: ráno, večer,
+  hádal. Číslo **nikdy** nemení nastavenia (to bola chyba v1) – X sa mení cez `/ciel`
+  (tlačidlá s hodnotami X) alebo `/ciel 9` a platí pre celý bežiaci týždeň; zadané
+  v nedeľu platí až od nasledujúceho pondelka. Pod každým hlásením sú tlačidlá
+  **↩️ Vrátiť** a **🎯 Bolo to X, nie kliky**, keby si sa pomýlil. Odpoveď je v riadkoch: ráno, večer,
   dnes a zostatok. Editované správy sa ignorujú (aby sa oprava čísla nezarátala dvakrát).
   Oprava nadol (chat, tabuľka, ↩️) zruší aj odčiarknutie pripomienky.
 - **Výzvy v chate**: na začiatku fázy jedna správa a potom **max 3× po 30 min**
@@ -55,11 +70,17 @@ ako jediný zdroj pravdy. Beží v samostatnom LXC kontajneri na Proxmoxe (`tren
 
 Hárok **Kliky** – jeden riadok = deň:
 
-| Dátum | Cieľ | Ráno | Večer | Spolu | Stav | Streak | Poznámka |
-|---|---|---|---|---|---|---|---|
-| ty aj bot | ty aj bot | ty aj bot | ty aj bot | bot | bot (ty: „zamrazený“) | bot | ty aj bot |
+| Dátum | Cieľ | Ráno | Večer | Spolu | Stav | Streak | Poznámka | Deň v týždni | X (týždeň) |
+|---|---|---|---|---|---|---|---|---|---|
+| ty aj bot | ty aj bot | ty aj bot | ty aj bot | bot | bot (ty: „zamrazený“) | bot | ty aj bot | bot | bot |
 
-Hárok **Nastavenia**: Zamrazené (ÁNO/NIE), Prírastok cieľa, Ranný čas, Večerný čas,
+Cieľ počíta bot z X a dňa v týždni, ale **čo doň napíšeš ty, to pre ten deň platí**;
+prázdna bunka znamená „drž sa plánu“, napísaná `0` je poctivé voľno. Stĺpce *Deň v týždni*
+a *X (týždeň)* sú len na pozeranie – ukazujú, z akého X sa cieľ počítal. Stav voľného dňa
+je 🌙 voľno (nie ❌).
+
+Hárok **Nastavenia**: Zamrazené (ÁNO/NIE), X (základ plánu), X platí od (pondelok),
+Rast X za týždeň, Ranný čas, Večerný čas,
 Max výziev v chate, Rozostup výziev (min), Názov rannej/večernej pripomienky (`{n}` = počet),
 Správa pri nesplnenom dni. Hárok **Návod** vysvetľuje to isté v tabuľke.
 
@@ -115,7 +136,7 @@ doplniť („včera 5“ alebo tabuľka).
   v tabuľke. Zmazať DB = bot si všetko načíta z tabuľky (stratí len históriu výziev).
 - Radicale dáta: `/var/lib/radicale/collections/collection-root/jakub/…` (záloha = kópia
   adresára; pri kopírovaní za behu použi `flock /var/lib/radicale/collections/.Radicale.lock`).
-- Testy: `python -m pytest tests` (100 testov: parsovanie, engine, tabuľka, pripomienky,
+- Testy: `python -m pytest trener/tests` (100 testov: parsovanie, engine, tabuľka, pripomienky,
   end-to-end simulácia dní a integračný test proti reálnemu Radicale, ak je nainštalované).
 
 Diagnóza pôvodnej verzie: [docs/DIAGNOZA-v1.md](docs/DIAGNOZA-v1.md).

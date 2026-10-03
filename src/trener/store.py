@@ -5,6 +5,7 @@ a nastavenia; táto DB drží to, čo v tabuľke nie je (kedy odišla výzva, ET
 from __future__ import annotations
 
 import sqlite3
+import logging
 from dataclasses import fields
 from datetime import date, datetime
 from pathlib import Path
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
 SETTINGS_TYPES = {f.name: f.type for f in fields(Settings)}
+log = logging.getLogger("trener.store")
 
 
 def _t(table: str) -> str:
@@ -141,7 +143,12 @@ class Store:
                 try:
                     setattr(s, r["key"], _from_str(r["key"], r["value"]))
                 except ValueError:
-                    pass
+                    log.warning("Nastavenie %s má v DB nepoužiteľnú hodnotu %r – beriem východiskovú %r.",
+                                r["key"], r["value"], getattr(s, r["key"]))
+        # X pod 1 by z každého dňa spravilo voľno a týždenný streak by rástol bez klikov
+        if int(s.x) < 1:
+            log.warning("X v DB je %s – dvíham na 1.", s.x)
+            s.x = 1
         return s
 
     def get_settings_synced(self) -> dict[str, str | None]:
