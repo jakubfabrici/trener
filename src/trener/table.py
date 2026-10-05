@@ -45,7 +45,7 @@ USER_COLS = ("goal", "morning", "evening")
 # (kľúč v Settings, popisok v tabuľke, popis)
 SETTINGS_ROWS = [
     ("frozen", "Zamrazené", "ÁNO = tréner nič nepripomína (chat ani Pripomienky), tabuľku ďalej sleduje."),
-    ("x", "X (základ plánu)", "Ráno 2X každý deň okrem nedele; v pondelok, stredu a piatok aj večer 2X."),
+    ("x", "X (základ plánu)", "Počet klikov v jednej sérii: ráno X každý deň okrem nedele; v pondelok, stredu a piatok aj večer X."),
     ("x_since", "X platí od (pondelok)", "Pondelok týždňa, pre ktorý platí X vyššie. Staršie aj novšie týždne sa dopočítajú."),
     ("x_step", "Rast X za týždeň", "O koľko sa X zvýši každý pondelok (0 = nerastie)."),
     ("morning_time", "Ranný čas", "Kedy príde ranná pripomienka a prvá výzva v chate (HH:MM)."),
@@ -68,8 +68,9 @@ TIME_KEYS = {"morning_time", "evening_time"}
 HELP_TEXT = [
     "Virtuálny tréner klikov – ako funguje táto tabuľka",
     "",
-    "• Plán riadi jediné číslo X (hárok Nastavenia): pondelok, streda, piatok = ráno 2X + večer 2X;",
-    "  utorok, štvrtok, sobota = ráno 2X a večer nič; nedeľa = voľno. X rastie každý pondelok o „Rast X za týždeň“.",
+    "• Plán riadi jediné číslo X (hárok Nastavenia) – je to jedna séria klikov:",
+    "  pondelok, streda, piatok = ráno X + večer X; utorok, štvrtok, sobota = ráno X a večer nič;",
+    "  nedeľa = voľno. X rastie každý pondelok o „Rast X za týždeň“ (0 = nerastie).",
     "• Hárok „Kliky“: jeden riadok = jeden deň. Do stĺpcov Cieľ, Ráno, Večer a Poznámka môžeš písať ty aj bot.",
     "• Stĺpce Deň a X sú len na pozeranie – ukazujú, z akého X sa cieľ toho dňa počítal.",
     "• Ráno = počet klikov, ktoré si dal v rannej fáze, Večer = vo večernej. Spolu, Stav a Streak počíta bot.",

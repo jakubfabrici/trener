@@ -34,7 +34,7 @@ D = date(2026, 9, 2)          # streda
 D_UT = date(2026, 9, 1)       # utorok – len ráno
 D_NE = date(2026, 9, 6)       # nedeľa – voľno
 D_PO = date(2026, 9, 7)       # pondelok – nové X
-# seed_x=3 → streda 2*3 ráno + 2*3 večer = 12, rovnako ako starý seed_goal=12
+# seed_x=6 → streda 6 ráno + 6 večer = 12; utorok 6 (len ráno)
 
 
 def at(h, m=0, s=0, d=D):
@@ -58,7 +58,7 @@ class Harness:
                      alarm_mode="off", pushover_token=None, pushover_user=None, pushover_device=None,
                      alarm_priority=2, alarm_sound="persistent", alarm_retry=60, alarm_expire=600,
                      alarm_webhook_url=None,
-                     seed_x=3, seed_x_step=1, seed_morning="07:00", seed_evening="19:20", tick_seconds=30)
+                     seed_x=6, seed_x_step=1, seed_morning="07:00", seed_evening="19:20", tick_seconds=30)
         self.cfg = cfg
         self.store = Store(cfg.state_db)
         self.backend = LocalBackend(cfg.local_table_path)
@@ -332,17 +332,17 @@ def test_user_ticks_and_renames_in_reminders(h):
 def test_commands(h):
     h.tick_at(at(6, 0))
     msg = asyncio.run(h.t.set_x(10))            # /ciel 10 = X, nie cieľ dňa
-    assert "X = 10 od tohto týždňa" in msg and "Dnes (streda): 20 ráno + 20 večer" in msg
-    assert h.store.get_day(D).goal == 40 and h.t.settings().x == 10
+    assert "X = 10 od tohto týždňa" in msg and "Dnes (streda): 10 ráno + 10 večer" in msg
+    assert h.store.get_day(D).goal == 20 and h.t.settings().x == 10
     h.tick_at(at(6, 1))
-    assert h.reminder("Ráno").summary == "💪 Ráno: 20 klikov"
+    assert h.reminder("Ráno").summary == "💪 Ráno: 10 klikov"
     assert "06:30" in asyncio.run(h.t.set_time(MORNING, "06:30"))
     h.tick_at(at(6, 2))
     assert h.reminder("Ráno").due.astimezone(TZ).strftime("%H:%M") == "06:30"
     fix = asyncio.run(h.t.fix(EVENING, 3))
-    assert "Večer: 3/20" in fix
+    assert "Večer: 3/10" in fix
     st = asyncio.run(h.t.status_text())
-    assert "3/40" in st and "X = 10 → 20 ráno + 20 večer" in st and "Streak" in st
+    assert "3/20" in st and "X = 10 → 10 ráno + 10 večer" in st and "Streak" in st
     assert "2" in asyncio.run(h.t.set_x_step(2)) and h.t.settings().x_step == 2
     assert "Tabuľka" in asyncio.run(h.t.table_info())
     assert "Sync hotový" in asyncio.run(h.t.force_sync())
@@ -467,13 +467,13 @@ def test_undo_and_it_was_a_goal(h):
     assert h.reminder("Ráno").completed        # ranná fáza „splnená“
     assert h.t.undo_available() == (True, True)
     msg = asyncio.run(h.t.undo_last(as_goal=True))
-    assert "X = 10 od tohto týždňa" in msg and "Dnes (streda): 20 ráno + 20 večer" in msg
+    assert "X = 10 od tohto týždňa" in msg and "Dnes (streda): 10 ráno + 10 večer" in msg
     day = h.store.get_day(D)
-    assert (day.goal, day.morning, day.evening) == (40, 0, 0)      # 10 bolo X, teda 4X na stredu
+    assert (day.goal, day.morning, day.evening) == (20, 0, 0)      # 10 bolo X, teda X + X na stredu
     h.tick_at(at(7, 7))
     m = h.reminder("Ráno")
-    assert not m.completed and m.summary == "💪 Ráno: 20 klikov"    # odčiarknutie zrušené, nový cieľ
-    assert h.table_rows()[D][0] == 40 and h.table_rows()[D][1] == 0
+    assert not m.completed and m.summary == "💪 Ráno: 10 klikov"    # odčiarknutie zrušené, nový cieľ
+    assert h.table_rows()[D][0] == 20 and h.table_rows()[D][1] == 0
     assert h.t.undo_available() == (False, False)
     # obyčajné vrátenie
     h.text(at(7, 10), "3")
@@ -655,15 +655,15 @@ def test_nedela_prechod_na_pondelok_dvihne_x(tmp_path):
     h = Harness(tmp_path, at(6, 0, 0, D_NE))
     h.tick_at(at(6, 0, 0, D_NE))
     nedela = h.store.get_day(D_NE)
-    assert nedela.goal == 0 and nedela.is_rest and h.t.settings().x_for(D_NE) == 3
+    assert nedela.goal == 0 and nedela.is_rest and h.t.settings().x_for(D_NE) == 6
     h.tick_at(at(22, 0, 0, D_NE))
     h.take()
     h.tick_at(at(0, 0, 30, D_PO))
     po = h.store.get_day(D_PO)
-    assert h.t.settings().x_for(D_PO) == 4                    # každý pondelok +x_step
-    assert po.goal == 16 and (po.morning_target, po.evening_target) == (8, 8)
+    assert h.t.settings().x_for(D_PO) == 7                    # každý pondelok +x_step
+    assert po.goal == 14 and (po.morning_target, po.evening_target) == (7, 7)
     assert h.take() == []                                     # za nedeľu sa nenadáva
-    assert h.table_rows()[D_PO][0] == 16
+    assert h.table_rows()[D_PO][0] == 14
     assert h.table_rows()[D_NE][3].startswith("🌙")           # nedeľa ostáva „voľno“
 
 
@@ -672,44 +672,44 @@ def test_x_nenarastie_dvakrat_ked_bot_v_pondelok_restartuje(tmp_path):
     h = Harness(tmp_path, at(6, 0, 0, D_NE))
     h.tick_at(at(20, 0, 0, D_NE))
     h.tick_at(at(0, 0, 30, D_PO))
-    assert h.store.get_day(D_PO).goal == 16
+    assert h.store.get_day(D_PO).goal == 14
     for kedy in (at(0, 5, 0, D_PO), at(6, 0, 0, D_PO), at(6, 40, 0, D_PO)):
         h.restart(kedy)
         h.tick_at(kedy)
     s = h.t.settings()
-    assert (s.x, s.x_since, s.x_step) == (3, "2026-08-31", 1)
-    assert s.x_for(D_PO) == 4 and h.store.get_day(D_PO).goal == 16
-    assert h.table_rows()[D_PO][0] == 16
+    assert (s.x, s.x_since, s.x_step) == (6, "2026-08-31", 1)
+    assert s.x_for(D_PO) == 7 and h.store.get_day(D_PO).goal == 14
+    assert h.table_rows()[D_PO][0] == 14
 
 
 def test_ciel_uprostred_tyzdna_prepocita_dnesok_aj_zvysok(h):
-    """/ciel 5 v stredu: dnešok hneď na 4X, budúce riadky tiež a zvyšok týždňa z plánu."""
+    """/ciel 5 v stredu: dnešok hneď na X+X, budúce riadky tiež a zvyšok týždňa z plánu."""
     h.tick_at(at(6, 0))
     h.store.save_day(Day(D + timedelta(days=2), 12))          # piatkový riadok už v DB
     msg = asyncio.run(h.t.set_x(5))
-    assert "X = 5 od tohto týždňa" in msg and "Dnes (streda): 10 ráno + 10 večer" in msg
-    assert "štvrtok: 10 ráno" in msg and "nedeľa: voľno 🌙" in msg
-    assert h.store.get_day(D).goal == 20                       # dnešok sa prepočítal hneď
-    assert h.store.get_day(D + timedelta(days=2)).goal == 20    # aj budúci riadok
+    assert "X = 5 od tohto týždňa" in msg and "Dnes (streda): 5 ráno + 5 večer" in msg
+    assert "štvrtok: 5 ráno" in msg and "nedeľa: voľno 🌙" in msg
+    assert h.store.get_day(D).goal == 10                       # dnešok sa prepočítal hneď
+    assert h.store.get_day(D + timedelta(days=2)).goal == 10    # aj budúci riadok
     h.tick_at(at(6, 5))
-    assert h.table_rows()[D][0] == 20
+    assert h.table_rows()[D][0] == 10
     h.tick_at(at(0, 0, 30, D + timedelta(days=1)))
-    assert h.store.get_day(D + timedelta(days=1)).goal == 10    # štvrtok: len ráno 2X
+    assert h.store.get_day(D + timedelta(days=1)).goal == 5     # štvrtok: len ráno X
     h.take()
     h.tick_at(at(0, 0, 30, D_PO))
-    assert h.store.get_day(D_PO).goal == 24                    # nový týždeň: X = 6
+    assert h.store.get_day(D_PO).goal == 12                    # nový týždeň: X = 6
 
 
 def test_ciel_v_nedelu_plati_az_od_nasledujuceho_pondelka(tmp_path):
     h = Harness(tmp_path, at(6, 0, 0, D_NE))
     h.tick_at(at(6, 0, 0, D_NE))
     msg = asyncio.run(h.t.set_x(9))
-    assert "od pondelka 7.9." in msg and "pondelok: 18 ráno + 18 večer" in msg
+    assert "od pondelka 7.9." in msg and "pondelok: 9 ráno + 9 večer" in msg
     assert "Dnes (" not in msg                                 # v nedeľu niet čo meniť
     assert h.t.settings().x_since == "2026-09-07"
     assert h.store.get_day(D_NE).goal == 0                     # nedeľa ostáva voľno
     h.tick_at(at(0, 0, 30, D_PO))
-    assert h.store.get_day(D_PO).goal == 36 and h.t.settings().x_for(D_PO) == 9
+    assert h.store.get_day(D_PO).goal == 18 and h.t.settings().x_for(D_PO) == 9
 
 
 def test_v_nedelu_nepride_ziadna_vyzva_ani_pripomienka(tmp_path):
@@ -761,7 +761,7 @@ def test_vypadok_bota_od_piatka_do_pondelka(tmp_path):
     days = {x.date: x for x in h.store.all_days()}
     assert days[d_so].frozen is True                           # sobota: bot nebežal, nie je to chyba
     assert days[D_NE].frozen is False and days[D_NE].is_rest    # nedeľu netreba mraziť
-    assert days[D_PO].goal == 16 and days[D_PO].frozen is False
+    assert days[D_PO].goal == 14 and days[D_PO].frozen is False
     msgs = h.take()
     assert not any(m.startswith("❌") for m in msgs)
     assert not any(m.startswith("☀️") for m in msgs)           # výzva spred 4 h sa nedobieha
@@ -789,7 +789,7 @@ def test_app_status_v_utorok_a_v_nedelu(tmp_path):
     hu = Harness(tmp_path / "ut", at(6, 0, 0, D_UT))
     hu.tick_at(at(6, 0, 0, D_UT))
     st = hu.t.shortcut_plan()["stav"]
-    assert st["den"] == "utorok" and st["x"] == 3 and st["volno"] is False
+    assert st["den"] == "utorok" and st["x"] == 6 and st["volno"] is False
     assert (st["ciel"], st["rano_ciel"], st["vecer_ciel"]) == (6, 6, 0)
     assert st["rano_due"].endswith("07:00:00+02:00") and st["vecer_due"] is None
     assert st["poznamka_rano"] == "kliky:2026-09-01:morning" and st["poznamka_vecer"] == ""
@@ -804,7 +804,7 @@ def test_app_status_v_utorok_a_v_nedelu(tmp_path):
     assert st["rano_due"] is None and st["vecer_due"] is None
     assert st["poznamka_rano"] == "" and st["poznamka_vecer"] == ""
     assert st["rano_hotovo"] is True and st["vecer_hotovo"] is True
-    assert st["zajtra_ciel"] == 16                             # pondelok už s novým X
+    assert st["zajtra_ciel"] == 14                             # pondelok už s novým X
 
 
 def test_bol_to_ciel_po_splnenom_dni_neumlci_dalsie_splnenie(h):
@@ -815,8 +815,8 @@ def test_bol_to_ciel_po_splnenom_dni_neumlci_dalsie_splnenie(h):
     msg = asyncio.run(h.t.undo_last(as_goal=True))
     assert "X = 12" in msg
     den = h.store.get_day(D)
-    assert den.goal == 48 and not den.done
-    h.edit_table(D, Ráno=24, Večer=24)
+    assert den.goal == 24 and not den.done        # X = 12 → 12 ráno + 12 večer
+    h.edit_table(D, Ráno=12, Večer=12)
     h.tick_at(at(7, 20))
     assert h.store.get_day(D).done
     assert any("🎉" in m for m in h.take())

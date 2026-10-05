@@ -168,7 +168,7 @@ def x_pick(settings: Settings, day: Day) -> str:
     x = settings.x_for(day.date)
     return (f"🎯 Teraz X = {x}. Dnes ({den(day.date)}) to je {rozpis(day.goal, day.date)}.\n"
             f"Vyber nové X, alebo napíš /ciel N. X je počet klikov v jednej sérii –"
-            f" ráno vždy 2X, v pondelok, stredu a piatok aj večer 2X.")
+            f" ráno vždy X, v pondelok, stredu a piatok aj večer X.")
 
 
 def x_set(settings: Settings, monday: date, day: Day, today: date) -> str:
@@ -190,7 +190,7 @@ BAD_FIX = "Použitie: /oprav ráno 5   alebo   /oprav večer 3   (nastaví presn
 SYNCED = "🔄 Sync hotový. Tabuľka: {table}; Pripomienky: {rem}."
 
 HELLO = ("Ahoj, som tvoj tréner klikov v2. 💪\n"
-         "• Plán: ráno 2X každý deň okrem nedele; v pondelok, stredu a piatok aj večer 2X. Nedeľa voľno.\n"
+         "• Plán: ráno X každý deň okrem nedele; v pondelok, stredu a piatok aj večer X. Nedeľa voľno.\n"
          "• X rastie každý pondelok o 1. Streak = počet celých splnených týždňov.\n"
          "• Číslo = kliky, ktoré si PRÁVE dal („2“, „2 ráno“, „5 večer“) – sčítavam ich. Pomýlil si sa? Pod odpoveďou je ↩️ Vrátiť.\n"
          "• X meníš cez /ciel (tlačidlá) alebo /ciel 9.\n"
@@ -199,7 +199,7 @@ HELLO = ("Ahoj, som tvoj tréner klikov v2. 💪\n"
          "/stav · /zmraz · /odmraz · /help")
 
 HELP = ("🤖 Tréner klikov – ako na to\n"
-        "PLÁN: po/st/pi = ráno 2X + večer 2X · ut/št/so = ráno 2X · nedeľa voľno.\n"
+        "PLÁN: po/st/pi = ráno X + večer X · ut/št/so = ráno X · nedeľa voľno.\n"
         "X rastie každý pondelok o 1 (/prirastok N zmení o koľko). Streak = celé splnené týždne.\n"
         "ČÍSLO = kliky, ktoré si práve dal (nie cieľ!). X meníš cez /ciel.\n"
         "• číslo – práve dané kliky do aktuálnej fázy (pred večerným časom ráno, potom večer)\n"
@@ -241,4 +241,4 @@ def alarm_text(session: str, day: Day) -> str:
     return f"Večerná dávka: zostáva {day.left} klikov z dnešných {day.goal}."
 
 
-BAD_X = "X musí byť celé číslo 1 až 40, napr. /ciel 9 (ráno aj večer je vždy 2X)."
+BAD_X = "X musí byť celé číslo 1 až 100, napr. /ciel 25 (X je jedna séria – ráno a vo väčšine dní aj večer)."

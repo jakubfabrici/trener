@@ -17,7 +17,7 @@ D = date(2026, 9, 2)            # streda – ráno 2X aj večer 2X
 D_UT = date(2026, 9, 1)         # utorok – len ráno 2X
 D_NE = date(2026, 9, 6)         # nedeľa – voľno, cieľ 0
 D_PO_NEXT = date(2026, 9, 7)    # pondelok ďalšieho týždňa – X je už o krok vyššie
-X5 = Settings(x=5, x_since="2026-08-31")     # X = 5 pre týždeň 31.8. – 6.9.2026, teda 2X = 10
+X10 = Settings(x=10, x_since="2026-08-31")   # X = 10 pre týždeň 31.8. – 6.9.2026 (jedna séria)
 
 
 def make():
@@ -35,7 +35,7 @@ def has_alarm(item) -> bool:
     return any(c.name == "VALARM" for c in item.vtodo.subcomponents)
 
 
-def plan_day(d: date, settings: Settings = X5, **kw) -> Day:
+def plan_day(d: date, settings: Settings = X10, **kw) -> Day:
     """Deň s cieľom presne podľa týždenného plánu (nie ručne vymysleným číslom)."""
     return Day(d, settings.goal_for(d), **kw)
 
@@ -189,9 +189,9 @@ def test_v_nedelu_ziadny_event():
     store, cal, cs = make()
     day = plan_day(D_NE)
     assert day.is_rest and day.goal == 0
-    out = cs.sync(day, X5)
+    out = cs.sync(day, X10)
     assert cal.list() == [] and not out.errors
-    cs.sync(day, X5)                                   # ani po druhom syncu
+    cs.sync(day, X10)                                   # ani po druhom syncu
     assert cal.list() == []
     assert store.get_reminder(D_NE, MORNING, "events") is None
     assert store.get_reminder(D_NE, EVENING, "events") is None
@@ -201,18 +201,18 @@ def test_v_utorok_len_ranny_event():
     store, cal, cs = make()
     day = plan_day(D_UT)
     assert (day.goal, day.morning_target, day.evening_target) == (10, 10, 0)   # 2X ráno
-    out = cs.sync(day, X5)
+    out = cs.sync(day, X10)
     assert [i.summary for i in cal.list()] == ["💪 Ráno: 10 klikov"]
     assert has_alarm(by(cal, "Ráno")) and by(cal, "Večer") is None and not out.errors
     assert store.get_reminder(D_UT, EVENING, "events") is None
-    cs.sync(day, X5)                                   # večerný nepribudne ani neskôr
+    cs.sync(day, X10)                                   # večerný nepribudne ani neskôr
     assert by(cal, "Večer") is None
 
 
 def test_stary_vecerny_event_v_utorok_sa_zmaze_nie_oznaci():
     store, cal, cs = make()
     leftover(store, cal, D_UT, EVENING, "💪 Večer: 6 klikov", "19:20")
-    out = cs.sync(plan_day(D_UT), X5)
+    out = cs.sync(plan_day(D_UT), X10)
     assert by(cal, "Večer") is None                                      # naozaj zmazaný
     assert [i.summary for i in cal.list()] == ["💪 Ráno: 10 klikov"]     # nezostalo „✅ Večer“
     assert store.get_reminder(D_UT, EVENING, "events") is None
@@ -223,7 +223,7 @@ def test_nedelny_zvysok_po_starom_plane_sa_zmaze():
     store, cal, cs = make()
     leftover(store, cal, D_NE, MORNING, "💪 Ráno: 6 klikov", "07:00")
     leftover(store, cal, D_NE, EVENING, "💪 Večer: 6 klikov", "19:20")
-    out = cs.sync(plan_day(D_NE), X5)
+    out = cs.sync(plan_day(D_NE), X10)
     assert cal.list() == [] and not out.errors
     assert store.get_reminder(D_NE, MORNING, "events") is None
     assert store.get_reminder(D_NE, EVENING, "events") is None
@@ -236,37 +236,37 @@ def test_nedelny_zvysok_sa_zmaze_aj_bez_zaznamu_v_db():
     uid = f"kliky-{D_NE.isoformat()}-morning-stary"
     start = datetime.combine(D_NE, hhmm_to_time("07:00"), tzinfo=TZ)
     cal.create(uid, build_event_ics(uid, "💪 Ráno: 6 klikov", start, 15))
-    out = cs.sync(plan_day(D_NE), X5)
+    out = cs.sync(plan_day(D_NE), X10)
     assert cal.list() == [] and not out.errors
 
 
 def test_utorkove_rano_zavrie_cely_den_a_umlci_budik():
     store, cal, cs = make()
     day = plan_day(D_UT)
-    cs.sync(day, X5)
+    cs.sync(day, X10)
     done = day.copy(morning=day.morning_target)
     assert done.done                                   # 2X ráno je celý utorkový cieľ
-    cs.sync(done, X5)
+    cs.sync(done, X10)
     m = by(cal, "Ráno")
     assert m.summary == "✅ 💪 Ráno: 10 klikov" and not has_alarm(m)
     assert len(cal.list()) == 1                        # večerný event nepribudne ani po splnení
 
 
-def test_nazvy_eventov_obsahuju_dvojnasobok_x():
+def test_nazvy_eventov_nesu_jedno_x():
     store, cal, cs = make()
-    cs.sync(plan_day(D), X5)                           # streda: 2X ráno + 2X večer
+    cs.sync(plan_day(D), X10)                           # streda: 2X ráno + 2X večer
     assert sorted(i.summary for i in cal.list()) == ["💪 Ráno: 10 klikov", "💪 Večer: 10 klikov"]
     _, cal2, cs2 = make()
-    cs2.sync(plan_day(D_PO_NEXT), X5)                  # o týždeň je X o krok vyššie → 2X = 12
-    assert sorted(i.summary for i in cal2.list()) == ["💪 Ráno: 12 klikov", "💪 Večer: 12 klikov"]
+    cs2.sync(plan_day(D_PO_NEXT), X10)                  # o týždeň je X o krok vyššie → 2X = 12
+    assert sorted(i.summary for i in cal2.list()) == ["💪 Ráno: 11 klikov", "💪 Večer: 11 klikov"]
 
 
 def test_strata_db_neduplikuje_eventy():
     """Rovnaká záruka ako pri pripomienkach (test_lost_db_adopts_existing_reminders…):
     dnešný event sa po strate DB prevezme podľa UID, nevytvorí sa druhý raz."""
     store, cal, cs = make()
-    cs.sync(plan_day(D), X5)
+    cs.sync(plan_day(D), X10)
     assert len(cal.list()) == 2
     cs2 = CalendarSync(cal, Store(":memory:"), TZ)      # nová prázdna DB, ten istý kalendár
-    out = cs2.sync(plan_day(D), X5)
+    out = cs2.sync(plan_day(D), X10)
     assert len(cal.list()) == 2 and not out.errors

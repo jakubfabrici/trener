@@ -30,7 +30,7 @@ def at(h, m=0, d=D):
 
 def nast(**kw) -> Settings:
     """X = 3 od pondelka 31. 8. → streda má cieľ 12 (6 ráno + 6 večer), utorok 6."""
-    return Settings(x=3, x_since=PO.isoformat(), **kw)
+    return Settings(x=6, x_since=PO.isoformat(), **kw)
 
 
 def tyzden_dni(monday: date, s: Settings, *, splnene: bool = True, frozen: bool = False) -> list[Day]:
@@ -72,11 +72,11 @@ def test_split_goal_podla_dna_v_tyzdni():
 
 def test_plan_targets_pre_cely_tyzden():
     assert [plan_targets(PO + timedelta(days=i), 3) for i in range(7)] == [
-        (6, 6), (6, 0), (6, 6), (6, 0), (6, 6), (6, 0), (0, 0)]
-    assert plan_targets(PO, 1) == (2, 2)
+        (3, 3), (3, 0), (3, 3), (3, 0), (3, 3), (3, 0), (0, 0)]
+    assert plan_targets(PO, 1) == (1, 1)
     assert plan_targets(NE, 100) == (0, 0)       # nedeľa je voľno pri akomkoľvek X
-    # týždenný objem: 4X + 2X + 4X + 2X + 4X + 2X + 0 = 18X
-    assert sum(sum(plan_targets(PO + timedelta(days=i), 3)) for i in range(7)) == 18 * 3
+    # týždenný objem: 2X + X + 2X + X + 2X + X + 0 = 9X
+    assert sum(sum(plan_targets(PO + timedelta(days=i), 3)) for i in range(7)) == 9 * 3
 
 
 def test_goal_for_kopiruje_plan_dna():
@@ -84,7 +84,7 @@ def test_goal_for_kopiruje_plan_dna():
     assert s.targets_for(ST) == (6, 6) and s.goal_for(ST) == 12
     assert s.targets_for(UT) == (6, 0) and s.goal_for(UT) == 6
     assert s.targets_for(NE) == (0, 0) and s.goal_for(NE) == 0
-    assert s.goal_for(PO2) == 16                 # nový týždeň, X = 4
+    assert s.goal_for(PO2) == 14                 # nový týždeň, X = 7 → 7 + 7
 
 
 def test_x_rastie_kazdy_pondelok():
@@ -105,18 +105,18 @@ def test_x_nikdy_neklesne_pod_jedna():
     assert s.x_for(date(2019, 1, 7)) == 1
     assert s.x_for(date(2026, 6, 1)) >= 1
     # …a preto sa staré týždne netvária ako samé voľno (inak by streak nešlo prerušiť)
-    assert s.goal_for(date(2019, 1, 7)) == 4     # pondelok = 4X
-    assert s.goal_for(date(2019, 1, 8)) == 2     # utorok = 2X
+    assert s.goal_for(date(2019, 1, 7)) == 2     # pondelok = X + X
+    assert s.goal_for(date(2019, 1, 8)) == 1     # utorok = X
 
 
 def test_with_x_plati_od_pondelka_a_ma_spodnu_hranicu():
     s = nast()
     s2, monday = s.with_x(9, ST)
     assert monday == PO and s2.x == 9 and s2.x_since == PO.isoformat()
-    assert s2.goal_for(ST) == 36 and s2.goal_for(UT) == 18
+    assert s2.goal_for(ST) == 18 and s2.goal_for(UT) == 9
     # v nedeľu (týždeň sa končí) sa nové X myslí na nasledujúci týždeň
     s3, monday3 = s.with_x(9, NE)
-    assert monday3 == PO2 and s3.goal_for(PO2) == 36
+    assert monday3 == PO2 and s3.goal_for(PO2) == 18
     # X pod 1 nedáva zmysel
     assert s.with_x(0, ST)[0].x == 1
 
@@ -308,11 +308,11 @@ def test_streak_after_stlpec_v_tabulke():
 def test_next_goal_progression():
     """Cieľ zajtrajška je čisto z plánu – nezávisí od toho, ako dopadol dnešok."""
     s = nast()
-    assert next_goal(Day(ST, 12, 6, 6), s) == 6                  # po stredu ide štvrtok: 2X
+    assert next_goal(Day(ST, 12, 6, 6), s) == 6                  # po stredu ide štvrtok: X
     assert next_goal(Day(ST, 12, 0, 0), s) == 6                  # ani odmena, ani trest
-    assert next_goal(Day(STV, 6, 6, 0), s) == 12                 # piatok: 4X
+    assert next_goal(Day(STV, 6, 6, 0), s) == 12                 # piatok: X + X
     assert next_goal(Day(SO, 6, 6, 0), s) == 0                   # nedeľa je voľno
-    assert next_goal(Day(NE, 0), s) == 16                        # pondelok už s novým X = 4
+    assert next_goal(Day(NE, 0), s) == 14                        # pondelok už s novým X = 7
 
 
 def test_fill_missing_days_after_downtime_freezes_gap():
@@ -349,9 +349,9 @@ def test_fill_missing_days_cez_vikend():
     """Sobota sa zamrazí, nedeľa je voľno (nikdy nie zamrazená) a pondelok má nové X."""
     s = nast()
     new = fill_missing_days([Day(PIA, 12, 6, 6)], PO2, s)
-    assert [(d.date, d.goal, d.frozen) for d in new] == [(SO, 6, True), (NE, 0, False), (PO2, 16, False)]
+    assert [(d.date, d.goal, d.frozen) for d in new] == [(SO, 6, True), (NE, 0, False), (PO2, 14, False)]
     assert new[1].is_rest and new[1].status(PO2) == REST
-    assert new[2].morning_target == 8 and new[2].evening_target == 8
+    assert new[2].morning_target == 7 and new[2].evening_target == 7
 
 
 def test_fill_missing_days_prazdna_db_v_nedelu():
@@ -367,8 +367,8 @@ def test_replan_meni_dnesok_a_buducnost_nie_historiu():
     nove, monday = s.with_x(5, ST)
     assert monday == PO
     zmenene = replan(dni, nove, ST)
-    assert [(d.date, d.goal) for d in zmenene] == [(ST, 20), (STV, 10)]
-    # sobota už sedí (2×5 = 10) a nemení sa; včerajšok sa neprepisuje vôbec
+    assert [(d.date, d.goal) for d in zmenene] == [(ST, 10), (STV, 5), (SO, 5)]
+    # včerajšok sa neprepisuje vôbec (sobota po novom X = 5, nie 10)
     assert all(d.date >= ST for d in zmenene)
     # keď ciele sedia s plánom, replan nevráti nič (netreba nič zapisovať)
     assert replan([Day(UT, 6, 6, 0), Day(ST, 12), Day(STV, 6)], s, ST) == []

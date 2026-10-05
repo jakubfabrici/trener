@@ -230,7 +230,7 @@ def test_new_row_without_goal_takes_goal_from_plan():
     p = parse_workbook(render([a]))
     p.days[D] = _row(D, goal=None, morning=3, row=3)
     m = merge(p, [(a, a)], Settings(), {}, D)
-    assert m.days[1].goal == GOAL_D == 28 and m.days[1].goal != a.goal
+    assert m.days[1].goal == GOAL_D == 14 and m.days[1].goal != a.goal
     assert m.days[1].status(D) == "open"
     # a nedeľný riadok bez cieľa vyjde z plánu ako voľno, nie ako kópia stredy
     p2 = parse_workbook(render([a]))
@@ -333,12 +333,12 @@ def test_rest_day_row_renders_with_volno_status():
 
 
 def test_weekday_and_x_columns_show_the_plan():
-    """Stĺpce Deň v týždni a X (týždeň) sedia na plán: 2X+2X v stredu, 2X v utorok, 0 v nedeľu."""
-    days = [Day(Y, 14, 0, 0), Day(D, 28, 0, 0), Day(NE, 0, 0, 0)]
+    """Stĺpce Deň v týždni a X (týždeň) sedia na plán: X+X v stredu, X v utorok, 0 v nedeľu."""
+    days = [Day(Y, 7, 0, 0), Day(D, 14, 0, 0), Day(NE, 0, 0, 0)]
     ws = load_workbook(io.BytesIO(render(days)))[SHEET_DAYS]
     assert [ws.cell(r, 9).value for r in (2, 3, 4)] == ["utorok", "streda", "nedeľa"]
     assert [ws.cell(r, 10).value for r in (2, 3, 4)] == [7, 7, 7]
-    assert [ws.cell(r, 2).value for r in (2, 3, 4)] == [14, 28, 0]
+    assert [ws.cell(r, 2).value for r in (2, 3, 4)] == [7, 14, 0]
 
 
 def test_missing_weekday_and_x_columns_are_added_to_old_table():
@@ -366,7 +366,7 @@ def test_x_change_in_settings_sheet_wins_and_is_not_pushed_back():
     m = merge(p, _synced(bot), s, _snap(s), D)
     assert m.settings.x == 5 and m.changed_settings == ["x"]
     assert any("X (základ plánu): 8 → 5" in n for n in m.from_table)
-    assert m.settings.goal_for(D) == 16                               # nový plán: 2·4 + 2·4
+    assert m.settings.goal_for(D) == 8                                # nový plán: 4 + 4
     # Zápis späť do hárku JE potrebný, ale nie kvôli X v Nastaveniach (to vyhralo),
     # lež kvôli stĺpcu „X (týždeň)“, ktorý po zmene plánu ukazuje staré číslo.
     assert m.to_table
@@ -398,7 +398,7 @@ def test_x_since_is_snapped_to_monday():
     assert p.settings["x_since"] == "2026-08-31"
     m = merge(p, _synced(bot), s, _snap(s), D)
     assert m.settings.x_since == "2026-08-31" and m.changed_settings == ["x_since"]
-    assert m.settings.x_for(D) == 8 and m.settings.goal_for(D) == 32   # X 8 už platí pre tento týždeň
+    assert m.settings.x_for(D) == 8 and m.settings.goal_for(D) == 16   # X 8 už platí pre tento týždeň
     # nezmyselný dátum sa odmietne a bot si nechá svoj
     p2 = parse_workbook(_set_setting(render([bot], s), "X platí od (pondelok)", "blabla"))
     assert "x_since" not in p2.settings and p2.warnings

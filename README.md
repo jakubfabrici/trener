@@ -10,8 +10,8 @@ ako jediný zdroj pravdy. Beží v samostatnom LXC kontajneri na Proxmoxe (`tren
 
   | deň | ráno | večer | spolu |
   |---|---|---|---|
-  | pondelok, streda, piatok | 2X | 2X | 4X |
-  | utorok, štvrtok, sobota | 2X | – | 2X |
+  | pondelok, streda, piatok | X | X | 2X |
+  | utorok, štvrtok, sobota | X | – | X |
   | nedeľa | – | – | voľno |
 
   **X rastie každý pondelok o 1**, bez ohľadu na to, ako týždeň dopadol (`/prirastok N`

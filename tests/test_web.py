@@ -59,7 +59,7 @@ class Phone:
                           alarm_mode="off", pushover_token=None, pushover_user=None,
                           pushover_device=None, alarm_priority=2, alarm_sound="persistent",
                           alarm_retry=60, alarm_expire=600, alarm_webhook_url=None,
-                          seed_x=3, seed_x_step=1, seed_morning="07:00", seed_evening="19:20",
+                          seed_x=6, seed_x_step=1, seed_morning="07:00", seed_evening="19:20",
                           tick_seconds=30)
         self.store = Store(self.cfg.state_db)
         self.t = A.Trainer(self.cfg, self.store, LocalBackend(self.cfg.local_table_path), None, self._send)
@@ -201,7 +201,7 @@ def test_stav_prechadza_tyzdnom_podla_planu(telefon):
         ("štvrtok", 6, 6, 0, 12),
         ("piatok", 12, 6, 6, 6),
         ("sobota", 6, 6, 0, 0),         # zajtra nedeľa – voľno
-        ("nedeľa", 0, 0, 0, 16),        # zajtra pondelok s X = 4
+        ("nedeľa", 0, 0, 0, 14),        # zajtra pondelok s X = 4
     ]
     for i, (den, ciel, rano, vecer, zajtra) in enumerate(ocakavane):
         p.tick_at(at(6, 0, PO + timedelta(days=i)))
@@ -209,12 +209,12 @@ def test_stav_prechadza_tyzdnom_podla_planu(telefon):
         assert (s["den"], s["ciel"], s["rano_ciel"], s["vecer_ciel"], s["zajtra_ciel"]) == \
                (den, ciel, rano, vecer, zajtra)
         assert s["datum"] == (PO + timedelta(days=i)).isoformat()
-        assert s["x"] == 3                      # X sa mení až v pondelok, celý týždeň drží
+        assert s["x"] == 6                      # X sa mení až v pondelok, celý týždeň drží
         assert s["volno"] is (ciel == 0)
     # ďalší pondelok X samo narastie o x_step (3 → 4) bez akéhokoľvek zásahu
     p.tick_at(at(6, 0, PO + timedelta(days=7)))
     s = p.stav()
-    assert (s["den"], s["x"], s["ciel"], s["rano_ciel"], s["vecer_ciel"]) == ("pondelok", 4, 16, 8, 8)
+    assert (s["den"], s["x"], s["ciel"], s["rano_ciel"], s["vecer_ciel"]) == ("pondelok", 7, 14, 7, 7)
 
 
 def test_stav_v_utorok_neponuka_vecer(telefon):
@@ -245,7 +245,7 @@ def test_stav_v_nedelu_je_volno(telefon):
     assert s["poznamka_rano"] == "" and s["poznamka_vecer"] == ""
     assert s["rano_hotovo"] is True and s["vecer_hotovo"] is True
     assert s["splneny"] is False and s["zostava"] == 0
-    assert s["zajtra_ciel"] == 16             # pondelok už s X = 4
+    assert s["zajtra_ciel"] == 14             # pondelok už s X = 7
     assert p.get("/plan")["pocet"] == 0       # v nedeľu žiadne pripomienky
 
 

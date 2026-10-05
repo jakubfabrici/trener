@@ -33,14 +33,15 @@ def report_keyboard(can_undo: bool, can_goal: bool) -> InlineKeyboardMarkup | No
     return InlineKeyboardMarkup([row]) if row else None
 
 
-# Hodnoty X, nie denného cieľa: X = 9 znamená 18 ráno (a v po/st/pi aj 18 večer).
-X_PRESETS = (4, 5, 6, 7, 8, 9, 10, 12, 15, 20)
+# Hodnoty X, nie denného cieľa: X je jedna séria – X = 25 znamená 25 ráno
+# (a v pondelok, stredu a piatok aj 25 večer, teda 50 za deň).
+X_PRESETS = (10, 15, 20, 25, 30, 35, 40, 50, 60, 75)
 GOAL_PRESETS = X_PRESETS          # starý názov pre spätnú kompatibilitu
-X_MIN, X_MAX = 1, 40
+X_MIN, X_MAX = 1, 100
 
 
 def goal_keyboard(current: int) -> InlineKeyboardMarkup:
-    vals = sorted(set(X_PRESETS) | {max(current - 1, X_MIN), current, min(current + 1, X_MAX)})
+    vals = sorted(set(X_PRESETS) | {max(current - 5, X_MIN), current, min(current + 5, X_MAX)})
     rows, row = [], []
     for v in vals:
         row.append(InlineKeyboardButton(f"{'✅ ' if v == current else ''}{v}", callback_data=f"goal:{v}"))  # X

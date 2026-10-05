@@ -2,8 +2,8 @@
 
 Tréningový plán je týždenný a riadi ho jediné číslo **X**:
 
-    pondelok, streda, piatok   ráno 2X + večer 2X   (spolu 4X)
-    utorok, štvrtok, sobota    ráno 2X, večer nič   (spolu 2X)
+    pondelok, streda, piatok   ráno X + večer X   (spolu 2X)
+    utorok, štvrtok, sobota    ráno X, večer nič   (spolu X)
     nedeľa                     voľno                (cieľ 0)
 
 X rastie každý pondelok o `x_step` (štandardne 1), bez ohľadu na to, ako
@@ -101,7 +101,7 @@ def x_from_goal(goal: int, d: date) -> int | None:
     """
     if goal <= 0:
         return None
-    delitel = 4 if d.weekday() in BOTH_DAYS else 2
+    delitel = 2 if d.weekday() in BOTH_DAYS else 1
     return goal // delitel if goal % delitel == 0 else None
 
 
@@ -112,13 +112,13 @@ def plan_targets(d: date, x: int) -> tuple[int, int]:
     if wd in REST_DAYS:
         return 0, 0
     if wd in MORNING_ONLY_DAYS:
-        return 2 * x, 0
-    return 2 * x, 2 * x
+        return x, 0
+    return x, x
 
 
 @dataclass
 class Settings:
-    x: int = 8                          # týždenné X: ráno 2X, v po/st/pi aj večer 2X
+    x: int = 8                          # týždenné X: ráno X, v po/st/pi aj večer X
     x_since: str = "2026-09-07"         # pondelok, pre ktorý X platí (ISO dátum)
     x_step: int = 1                     # o koľko rastie X každý pondelok
     morning_time: str = "07:00"         # začiatok rannej fázy (pripomienka + prvá výzva v chate)
